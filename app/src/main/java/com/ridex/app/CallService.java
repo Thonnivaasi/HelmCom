@@ -160,6 +160,7 @@ public class CallService extends Service {
                     s.receive(p);
                     byte[] d = new byte[p.getLength()];
                     System.arraycopy(p.getData(), 0, d, 0, p.getLength());
+                    android.util.Log.v("RideX", "recv voice pkt len=" + d.length);
                     if (!voiceQ.offer(d)) { voiceQ.poll(); voiceQ.offer(d); }
                 } catch (SocketTimeoutException ignored) {}
             }

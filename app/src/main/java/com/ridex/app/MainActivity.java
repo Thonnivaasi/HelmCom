@@ -177,6 +177,7 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
                     }
                     showCallUI();
                     setStatus("Connected");
+                    startTimer();
                 });
             }
             public void onTimeout() { runOnUiThread(() -> setStatus("Host not found")); }
@@ -201,7 +202,7 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
         btnConnect.setVisibility(View.GONE);
         btnEndCall.setVisibility(View.VISIBLE);
         tvTimer.setVisibility(View.VISIBLE);
-        callSeconds = 0; startTimer();
+        callSeconds = 0;
     }
 
     private void endCall() {
@@ -303,6 +304,7 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
             tvPeer.setText("• " + username); tvPeer.setVisibility(View.VISIBLE);
             if (isHost) { service.startSession(addr, true); Prefs.saveLastIp(this, addr.getHostAddress()); }
             setStatus("In call");
+            startTimer();
         });
     }
     @Override public void onDisconnected() {
