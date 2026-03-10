@@ -199,12 +199,13 @@ public class CallService extends Service {
         while (running.get()) {
             try {
                 byte[] d = musicQ.poll(300, TimeUnit.MILLISECONDS);
-                if (d != null && musicPlayer != null) {
-                    float g = ducking ? musicGain * 0.3f : musicGain;
-                    applyGain(d, g);
-                    musicPlayer.write(d, 0, d.length);
-                }
+                if (d == null) continue;
+                if (musicPlayer == null || musicPlayer.getState() != AudioTrack.STATE_INITIALIZED) continue;
+                float g = ducking ? musicGain * 0.3f : musicGain;
+                applyGain(d, g);
+                musicPlayer.write(d, 0, d.length);
             } catch (InterruptedException e) { break; }
+            catch (Exception ignored) {}
         }
     }
 
