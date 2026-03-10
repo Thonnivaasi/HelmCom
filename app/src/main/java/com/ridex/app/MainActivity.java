@@ -15,10 +15,10 @@ import org.json.*;
 import java.net.InetAddress;
 import java.util.*;
 public class MainActivity extends AppCompatActivity implements CallService.Callback {
-    private EditText etUsername, etRoomCode;
+    private EditText etUsername;
     private TextView tvSaveUser, tvStatus, tvPeer, tvTimer, tvRoomCode;
     private TextView tvNowPlaying, tvPlaylistName, tvVoiceVol, tvMusicVol;
-    private Button btnConnect, btnEndCall, btnMute, btnSpeaker;
+    private Button btnHost, btnJoin, btnEndCall, btnMute, btnSpeaker;
     private Button btnPrev, btnPlayPause, btnNext, btnExpandMusic, btnAddPlaylist;
     private SeekBar seekVoice, seekMusic;
     private Spinner spinnerPlaylist;
@@ -60,7 +60,6 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
 
     private void bindViews() {
         etUsername      = findViewById(R.id.etUsername);
-        etRoomCode      = findViewById(R.id.etRoomCode);
         tvSaveUser      = findViewById(R.id.tvSaveUser);
         tvStatus        = findViewById(R.id.tvStatus);
         tvPeer          = findViewById(R.id.tvPeer);
@@ -70,7 +69,8 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
         tvPlaylistName  = findViewById(R.id.tvPlaylistName);
         tvVoiceVol      = findViewById(R.id.tvVoiceVol);
         tvMusicVol      = findViewById(R.id.tvMusicVol);
-        btnConnect      = findViewById(R.id.btnConnect);
+        btnHost         = findViewById(R.id.btnConnect);
+        btnJoin         = findViewById(R.id.btnJoin);
         btnEndCall      = findViewById(R.id.btnEndCall);
         btnMute         = findViewById(R.id.btnMute);
         btnSpeaker      = findViewById(R.id.btnSpeaker);
@@ -93,7 +93,8 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
             String u = etUsername.getText().toString().trim();
             if (!u.isEmpty()) { Prefs.saveUsername(this, u); toast("Saved"); }
         });
-        btnConnect.setOnClickListener(v -> onConnectClicked());
+        btnHost.setOnClickListener(v -> startHost());
+        btnJoin.setOnClickListener(v -> startJoin());
         btnEndCall.setOnClickListener(v -> endCall());
         btnMute.setOnClickListener(v -> toggleMute());
         btnSpeaker.setOnClickListener(v -> toggleSpeaker());
@@ -140,51 +141,41 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
         });
     }
 
-    private void onConnectClicked() {
-        String code = etRoomCode.getText().toString().trim();
-        if (code.isEmpty()) startHost(); else startJoin(code);
-    }
-
     private void startHost() {
         isHost = true;
-        String code = String.format("%06d", new Random().nextInt(1000000));
-        Prefs.saveLastCode(this, code);
-        tvRoomCode.setText("Room: " + code);
+        String myName = Prefs.getUsername(this);
+        tvRoomCode.setText("Hosting as: " + myName);
         tvRoomCode.setVisibility(View.VISIBLE);
-        setStatus("Hosting  " + code);
+        setStatus("Waiting for guest...");
         if (discovery != null) discovery.stop();
         discovery = new DiscoveryHelper();
-        discovery.startBeacon(code);
-        if (bound) {
-            service.setHost(true);
-            service.setPlaylists(playlists);
-            service.startSession(null, true);
-        }
+        discovery.startBeacon(myName);
+        if (bound) { service.setHost(true); service.setPlaylists(playlists); service.startSession(null, true); }
         showCallUI();
         refreshPlaylistSpinner();
     }
 
-    private void startJoin(String code) {
+    private void startJoin() {
         isHost = false;
-        setStatus("Searching...");
+        setStatus("Scanning for host...");
         if (discovery != null) discovery.stop();
         discovery = new DiscoveryHelper();
-        discovery.searchForHost(code, new DiscoveryHelper.Listener() {
-            public void onFound(InetAddress addr, String c) {
+        discovery.searchForHost(new DiscoveryHelper.Listener() {
+            public void onFound(InetAddress addr, String hostName) {
                 runOnUiThread(() -> {
                     Prefs.saveLastIp(MainActivity.this, addr.getHostAddress());
-                    Prefs.saveLastCode(MainActivity.this, c);
+                    Prefs.saveLastCode(MainActivity.this, hostName);
                     if (bound) {
                         service.setHost(false);
                         service.startSession(addr, false);
                         service.sendControl(Protocol.CMD_HELLO + Prefs.getUsername(MainActivity.this));
                     }
                     showCallUI();
-                    setStatus("Connected");
+                    setStatus("Connected to " + hostName);
                     startTimer();
                 });
             }
-            public void onTimeout() { runOnUiThread(() -> setStatus("Host not found")); }
+            public void onTimeout() { runOnUiThread(() -> setStatus("No host found")); }
         });
     }
 
@@ -195,7 +186,7 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
             new Thread(() -> {
                 try {
                     if (InetAddress.getByName(ip).isReachable(2000))
-                        runOnUiThread(() -> startJoin(code));
+                        runOnUiThread(() -> startJoin());
                 } catch (Exception ignored) {}
             }).start();
         }
@@ -203,7 +194,8 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
 
     private void showCallUI() {
         inCall = true;
-        btnConnect.setVisibility(View.GONE);
+        btnHost.setVisibility(View.GONE);
+        btnJoin.setVisibility(View.GONE);
         btnEndCall.setVisibility(View.VISIBLE);
         tvTimer.setVisibility(View.VISIBLE);
         callSeconds = 0;
@@ -213,7 +205,8 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
         inCall = false; stopTimer();
         if (discovery != null) { discovery.stop(); discovery = null; }
         if (bound) service.stopSession();
-        btnConnect.setVisibility(View.VISIBLE);
+        btnHost.setVisibility(View.VISIBLE);
+        btnJoin.setVisibility(View.VISIBLE);
         btnEndCall.setVisibility(View.GONE);
         tvTimer.setVisibility(View.GONE);
         tvRoomCode.setVisibility(View.GONE);
@@ -255,7 +248,7 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
         String title = p.titles.get(song);
         tvNowPlaying.setText(title);
         tvPlaylistName.setText(p.name);
-        btnPlayPause.setText("⏸");
+        btnPlayPause.setText("\u23F8");
         service.sendControl(Protocol.CMD_NOW_PLAYING + p.name + "|" + title);
     }
 
@@ -263,13 +256,13 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
         if (isHost) {
             if (isPlaying) {
                 service.stopMusicStream(); isPlaying = false;
-                btnPlayPause.setText("▶");
+                btnPlayPause.setText("\u25B6");
                 service.sendControl(Protocol.CMD_PAUSE);
             } else { playSong(currentPl, currentSong); }
         } else if (bound && inCall) {
             service.sendControl(isPlaying ? Protocol.CMD_PAUSE : Protocol.CMD_PLAY);
             isPlaying = !isPlaying;
-            btnPlayPause.setText(isPlaying ? "⏸" : "▶");
+            btnPlayPause.setText(isPlaying ? "\u23F8" : "\u25B6");
         }
     }
 
@@ -292,7 +285,7 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
     private void toggleMusicPanel() {
         musicPanelOpen = !musicPanelOpen;
         musicPanel.setVisibility(musicPanelOpen ? View.VISIBLE : View.GONE);
-        btnExpandMusic.setText(musicPanelOpen ? "⌄" : "⌃");
+        btnExpandMusic.setText(musicPanelOpen ? "\u2304" : "\u2303");
     }
     private void toggleMute() {
         muted = !muted; btnMute.setText(muted ? "Unmute" : "Mute");
@@ -305,10 +298,9 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
 
     @Override public void onPeerConnected(String username, InetAddress addr) {
         runOnUiThread(() -> {
-            tvPeer.setText("• " + username); tvPeer.setVisibility(View.VISIBLE);
-            if (isHost) { Prefs.saveLastIp(this, addr.getHostAddress()); }
-            else { service.setPeer(addr); }
-            setStatus("In call");
+            tvPeer.setText("\u2022 " + username); tvPeer.setVisibility(View.VISIBLE);
+            if (isHost) { Prefs.saveLastIp(this, addr.getHostAddress()); service.setPeer(addr); }
+            setStatus("In call with " + username);
             startTimer();
         });
     }
@@ -318,7 +310,7 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
     @Override public void onNowPlaying(String playlist, String song) {
         runOnUiThread(() -> {
             tvNowPlaying.setText(song); tvPlaylistName.setText(playlist);
-            isPlaying = true; btnPlayPause.setText("⏸");
+            isPlaying = true; btnPlayPause.setText("\u23F8");
         });
     }
     @Override public void onControlMessage(String msg) {
@@ -358,6 +350,7 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
     }
 
     private void startTimer() {
+        stopTimer();
         timerRunnable = new Runnable() { public void run() {
             callSeconds++;
             tvTimer.setText(String.format("%02d:%02d", callSeconds / 60, callSeconds % 60));
