@@ -246,6 +246,7 @@ public class CallService extends Service {
         }, "MusicStream").start();
     }
 
+    public void setPeer(InetAddress addr) { this.peerAddr = addr; }
     public void stopMusicStream() {
         musicRunning.set(false);
         try { if (musicStream   != null) { musicStream.close();   musicStream   = null; } } catch (Exception e) {}
