@@ -53,7 +53,9 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
         setContentView(R.layout.activity_main);
         playlists = new PlaylistManager(this);
         bindViews(); requestPerms(); loadPrefs(); setupListeners(); setupFolderPicker();
-        bindService(new Intent(this, CallService.class), conn, Context.BIND_AUTO_CREATE);
+        Intent svc = new Intent(this, CallService.class);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(svc); else startService(svc);
+        bindService(svc, conn, Context.BIND_AUTO_CREATE);
     }
 
     private void bindViews() {
