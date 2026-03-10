@@ -155,7 +155,11 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
         if (discovery != null) discovery.stop();
         discovery = new DiscoveryHelper();
         discovery.startBeacon(code);
-        if (bound) { service.setHost(true); service.setPlaylists(playlists); }
+        if (bound) {
+            service.setHost(true);
+            service.setPlaylists(playlists);
+            service.startSession(null, true);
+        }
         showCallUI();
         refreshPlaylistSpinner();
     }
@@ -302,7 +306,8 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
     @Override public void onPeerConnected(String username, InetAddress addr) {
         runOnUiThread(() -> {
             tvPeer.setText("• " + username); tvPeer.setVisibility(View.VISIBLE);
-            if (isHost) { service.startSession(addr, true); Prefs.saveLastIp(this, addr.getHostAddress()); }
+            if (isHost) { Prefs.saveLastIp(this, addr.getHostAddress()); }
+            else { service.setPeer(addr); }
             setStatus("In call");
             startTimer();
         });
