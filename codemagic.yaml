@@ -1,0 +1,18 @@
+workflows:
+  android-debug:
+    name: RideX Debug
+    max_build_duration: 60
+    environment:
+      java: 17
+    scripts:
+      - name: Set SDK
+        script: echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
+      - name: Install Gradle wrapper
+        script: |
+          curl -L https://github.com/gradle/gradle-wrapper/raw/main/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
+          curl -L https://raw.githubusercontent.com/gradle/gradle/master/gradlew -o gradlew
+          chmod +x gradlew
+      - name: Build debug APK
+        script: ./gradlew assembleDebug
+    artifacts:
+      - app/build/outputs/**/*.apk
