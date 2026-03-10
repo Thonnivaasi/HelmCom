@@ -92,7 +92,8 @@ public class CallService extends Service {
     }
 
     private void setupAudio() throws Exception {
-        am.setMode(AudioManager.MODE_IN_COMMUNICATION);
+        am.setMode(AudioManager.MODE_NORMAL);
+        am.setSpeakerphoneOn(true);
         am.setSpeakerphoneOn(false);
 
         int recBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, FORMAT);
