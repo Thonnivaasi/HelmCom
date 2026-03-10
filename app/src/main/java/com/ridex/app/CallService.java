@@ -2,6 +2,7 @@ package com.ridex.app;
 import android.app.*;
 import android.content.Intent;
 import android.media.*;
+import android.media.AudioAttributes;
 import android.net.Uri;
 import android.os.*;
 import androidx.core.app.NotificationCompat;
@@ -58,6 +59,7 @@ public class CallService extends Service {
         super.onCreate();
         am = (AudioManager) getSystemService(AUDIO_SERVICE);
         createChannel();
+        startForeground(NID, buildNotif("RideX ready"));
     }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
@@ -83,22 +85,38 @@ public class CallService extends Service {
     private void setupAudio() {
         am.setMode(AudioManager.MODE_IN_COMMUNICATION);
         int minR = Math.max(AudioRecord.getMinBufferSize(SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT), BUF);
-        recorder = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT), BUF * 2);
+        recorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minR);
-        int minVP = AudioTrack.getMinBufferSize(SAMPLE_RATE,
-            AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
-        voicePlayer = new AudioTrack(AudioManager.STREAM_VOICE_CALL, SAMPLE_RATE,
-            AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
-            Math.max(minVP, BUF), AudioTrack.MODE_STREAM);
-        int minMP = AudioTrack.getMinBufferSize(44100,
-            AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT);
-        musicPlayer = new AudioTrack(AudioManager.STREAM_MUSIC, 44100,
-            AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT,
-            Math.max(minMP, 4096), AudioTrack.MODE_STREAM);
-        recorder.startRecording();
-        voicePlayer.play();
-        musicPlayer.play();
+        int minVP = Math.max(AudioTrack.getMinBufferSize(SAMPLE_RATE,
+            AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT), BUF * 2);
+        voicePlayer = new AudioTrack(
+            new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build(),
+            new AudioFormat.Builder()
+                .setSampleRate(SAMPLE_RATE)
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build(),
+            minVP, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE);
+        int minMP = Math.max(AudioTrack.getMinBufferSize(SAMPLE_RATE,
+            AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT), BUF * 2);
+        musicPlayer = new AudioTrack(
+            new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build(),
+            new AudioFormat.Builder()
+                .setSampleRate(SAMPLE_RATE)
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build(),
+            minMP, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE);
+        if (recorder.getState() == AudioRecord.STATE_INITIALIZED) recorder.startRecording();
+        if (voicePlayer.getState() == AudioTrack.STATE_INITIALIZED) voicePlayer.play();
+        if (musicPlayer.getState() == AudioTrack.STATE_INITIALIZED) musicPlayer.play();
     }
 
     private void voiceSendLoop() {
