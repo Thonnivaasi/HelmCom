@@ -287,7 +287,7 @@ public class CallService extends Service {
             callback.onPeerConnected(msg.substring(Protocol.CMD_ACK.length()), from);
         } else if (msg.startsWith(Protocol.CMD_NOW_PLAYING)) {
             String rest = msg.substring(Protocol.CMD_NOW_PLAYING.length());
-            String[] parts = rest.split("\|", 2);
+            String[] parts = rest.split("\\|", 2);
             callback.onNowPlaying(parts.length > 0 ? parts[0] : "", parts.length > 1 ? parts[1] : "");
         } else if (msg.startsWith(Protocol.CMD_MUSIC_VOL)) {
             try { musicGain = Float.parseFloat(msg.substring(Protocol.CMD_MUSIC_VOL.length())); } catch (Exception ignored) {}
