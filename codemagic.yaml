@@ -7,12 +7,13 @@ workflows:
     scripts:
       - name: Set SDK
         script: echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
-      - name: Install Gradle wrapper
+      - name: Install Gradle
         script: |
-          curl -L https://github.com/gradle/gradle-wrapper/raw/main/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
-          curl -L https://raw.githubusercontent.com/gradle/gradle/master/gradlew -o gradlew
-          chmod +x gradlew
+          curl -L "https://services.gradle.org/distributions/gradle-8.4-bin.zip" -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /tmp/
+          export GRADLE_HOME=/tmp/gradle-8.4
+          echo "export PATH=$GRADLE_HOME/bin:$PATH" >> $CM_ENV
       - name: Build debug APK
-        script: ./gradlew assembleDebug
+        script: /tmp/gradle-8.4/bin/gradle assembleDebug
     artifacts:
       - app/build/outputs/**/*.apk
