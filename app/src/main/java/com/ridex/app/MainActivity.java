@@ -374,5 +374,23 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
     @Override public void onRequestPermissionsResult(int req,@NonNull String[] p,@NonNull int[] r){
         super.onRequestPermissionsResult(req,p,r);
     }
+    @Override protected void onResume(){
+        super.onResume();
+        if(!bound)return;
+        // Restore UI to match actual call state
+        if(service!=null&&service.isSessionActive()){
+            if(!inCall){
+                inCall=true;
+                btnHost.setVisibility(android.view.View.GONE);
+                btnJoin.setVisibility(android.view.View.GONE);
+                btnEndCall.setVisibility(android.view.View.VISIBLE);
+                tvTimer.setVisibility(android.view.View.VISIBLE);
+                if(isHost){
+                    tvRoomCode.setVisibility(android.view.View.VISIBLE);
+                    refreshPlaylistSpinner();
+                }
+            }
+        }
+    }
     @Override protected void onDestroy(){if(bound)unbindService(conn);super.onDestroy();}
 }

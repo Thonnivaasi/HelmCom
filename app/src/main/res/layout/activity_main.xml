@@ -138,14 +138,14 @@
         <TextView android:id="@+id/tvPlaylistName"
             android:layout_width="match_parent" android:layout_height="wrap_content"
             android:text="No playlist" android:textColor="@color/text_secondary"
-            android:textSize="12sp" android:singleLine="true"/>
+            android:textSize="18sp" android:textStyle="bold" android:singleLine="true"/>
       </LinearLayout>
       <Button android:id="@+id/btnPrev" android:layout_width="64dp" android:layout_height="64dp"
           android:text="⏮" android:background="@null" android:textColor="@color/text_primary" android:textSize="24sp"/>
       <Button android:id="@+id/btnPlayPause" android:layout_width="64dp" android:layout_height="64dp"
-          android:text="▶" android:background="@drawable/bg_surface2" android:textColor="@color/accent" android:textSize="20sp"/>
+          android:text="▶" android:background="@drawable/bg_accent" android:textColor="#FFFFFF" android:textSize="24sp"/>
       <Button android:id="@+id/btnNext" android:layout_width="64dp" android:layout_height="64dp"
-          android:text="⏭" android:background="@null" android:textColor="@color/text_primary" android:textSize="13sp"/>
+          android:text="⏭" android:background="@null" android:textColor="@color/text_primary" android:textSize="24sp"/>
       <Button android:id="@+id/btnExpandMusic" android:layout_width="56dp" android:layout_height="56dp"
           android:text="&#8963;" android:background="@null" android:textColor="@color/text_secondary" android:textSize="18sp"/>
     </LinearLayout>

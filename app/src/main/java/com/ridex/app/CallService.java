@@ -344,6 +344,7 @@ public class CallService extends Service {
         if(am!=null)am.setMode(AudioManager.MODE_NORMAL);
         updateNotif("RideX ready");
     }
+    public boolean isSessionActive(){return running.get();}
     public void resetPeerKeepAlive(){
         stopMusicStream();peerAddr=null;voiceQ.clear();musicQ.clear();
         updateNotif("RideX hosting");
