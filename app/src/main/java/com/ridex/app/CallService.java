@@ -188,20 +188,23 @@ public class CallService extends Service {
                 int songCh=fmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)?fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT):2;
                 int chOut=songCh>=2?AudioFormat.CHANNEL_OUT_STEREO:AudioFormat.CHANNEL_OUT_MONO;
                 int bytesPerSec=songRate*songCh*2;
-                int localBuf=Math.max(AudioTrack.getMinBufferSize(songRate,chOut,FORMAT),8192);
-                localTrack=new AudioTrack(AudioManager.STREAM_MUSIC,songRate,chOut,FORMAT,localBuf*4,AudioTrack.MODE_STREAM);
+                // Use small local buffer so write() blocks quickly — this IS our clock
+                int localBuf=AudioTrack.getMinBufferSize(songRate,chOut,FORMAT);
+                localTrack=new AudioTrack(AudioManager.STREAM_MUSIC,songRate,chOut,FORMAT,
+                    localBuf*2,AudioTrack.MODE_STREAM);
                 if(localTrack.getState()==AudioTrack.STATE_INITIALIZED)localTrack.play();
                 sock=new DatagramSocket();
                 if(peerAddr!=null){
                     byte[] hdr=("HDR:"+songRate+":"+songCh).getBytes("UTF-8");
                     sock.send(new DatagramPacket(hdr,hdr.length,peerAddr,Protocol.PORT_MUSIC));
-                    Thread.sleep(100);
+                    Thread.sleep(150);
                 }
                 codec=MediaCodec.createDecoderByType(mime);
                 codec.configure(fmt,null,null,0);codec.start();
                 MediaCodec.BufferInfo info=new MediaCodec.BufferInfo();
                 boolean inputDone=false;
-                int chunkSize=Math.min(bytesPerSec/25,1400);
+                // UDP-safe chunk: 20ms of audio
+                int chunkSize=Math.min((bytesPerSec/50)&~1,1400);
                 while(musicRunning.get()&&musicGeneration.get()==myGen){
                     if(!inputDone){
                         int inIdx=codec.dequeueInputBuffer(10000);
@@ -217,15 +220,22 @@ public class CallService extends Service {
                         ByteBuffer outBuf=codec.getOutputBuffer(outIdx);
                         byte[] pcm=new byte[info.size];outBuf.get(pcm);
                         codec.releaseOutputBuffer(outIdx,false);
-                        if(localTrack!=null&&localTrack.getState()==AudioTrack.STATE_INITIALIZED){
-                            byte[] lc=pcm.clone();applyGain(lc,musicGain);localTrack.write(lc,0,lc.length);
-                        }
+                        // Send to receiver in chunks, then write same chunk locally.
+                        // localTrack.write() BLOCKS until HW consumes audio — natural clock!
                         int offset=0;
                         while(offset<pcm.length&&musicRunning.get()&&musicGeneration.get()==myGen){
                             int len=Math.min(chunkSize,pcm.length-offset);
-                            if(peerAddr!=null)sock.send(new DatagramPacket(pcm,offset,len,peerAddr,Protocol.PORT_MUSIC));
+                            // 1. Send to receiver first (non-blocking)
+                            if(peerAddr!=null)
+                                sock.send(new DatagramPacket(pcm,offset,len,peerAddr,Protocol.PORT_MUSIC));
+                            // 2. Play locally — this write() blocks, pacing the loop naturally
+                            if(localTrack!=null&&localTrack.getState()==AudioTrack.STATE_INITIALIZED){
+                                byte[] lc=new byte[len];
+                                System.arraycopy(pcm,offset,lc,0,len);
+                                applyGain(lc,musicGain);
+                                localTrack.write(lc,0,len); // blocks here = our clock
+                            }
                             offset+=len;
-                            long ms=(len*1000L)/bytesPerSec;if(ms>0)Thread.sleep(ms);
                         }
                         if((info.flags&MediaCodec.BUFFER_FLAG_END_OF_STREAM)!=0)break;
                     }

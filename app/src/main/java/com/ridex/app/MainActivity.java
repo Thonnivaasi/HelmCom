@@ -132,6 +132,7 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
     }
     private void startHost(){
         isHost=true;
+        btnAddPlaylist.setVisibility(android.view.View.VISIBLE);
         String myName=Prefs.getUsername(this);
         tvRoomCode.setText("Hosting as: "+myName);
         tvRoomCode.setVisibility(View.VISIBLE);
@@ -145,6 +146,7 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
     private void startJoin(){
         if(inCall)return;
         isHost=false;
+        btnAddPlaylist.setVisibility(android.view.View.GONE);
         setStatus("Scanning for host...");
         if(discovery!=null)discovery.stop();
         discovery=new DiscoveryHelper();
@@ -194,6 +196,7 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
         tvTimer.setVisibility(View.GONE);
         tvRoomCode.setVisibility(View.GONE);
         tvPeer.setVisibility(View.GONE);
+        btnAddPlaylist.setVisibility(android.view.View.VISIBLE);
         setStatus("Tap Join to reconnect");isPlaying=false;
         btnPlayPause.setText("\u25B6");
         remotePlNames.clear();remoteSongs.clear();
