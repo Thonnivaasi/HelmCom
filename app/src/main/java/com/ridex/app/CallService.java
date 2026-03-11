@@ -1,462 +1,336 @@
-package com.ridex.app;
-import android.app.*;
+package com.voicecallpro.app;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
 import android.content.Intent;
-import android.media.*;
-import android.net.Uri;
-import android.os.*;
+import android.media.AudioFormat;
+import android.media.AudioManager;
+import android.media.AudioRecord;
+import android.media.AudioTrack;
+import android.media.MediaRecorder;
+import android.os.Binder;
+import android.os.Build;
+import android.os.IBinder;
 import androidx.core.app.NotificationCompat;
-import java.io.*;
-import java.net.*;
-import java.nio.ByteBuffer;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.SocketException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class CallService extends Service {
-    public static final String ACTION_STOP = "com.ridex.app.STOP";
-    private static final String CH  = "ridex_ch";
-    private static final int    NID = 1;
-    private static final int VOICE_RATE = 16000;
-    private static final int FORMAT     = AudioFormat.ENCODING_PCM_16BIT;
-    private static final int PKT_SIZE   = 320;
+
+    public static final String ACTION_END_CALL = "com.voicecallpro.END_CALL";
+    public static final String ACTION_MUTE     = "com.voicecallpro.MUTE";
+
+    private static final String CHANNEL_ID  = "voicecall_channel";
+    private static final int    NOTIF_ID    = 1;
+
+    // Audio config
+    private static final int SAMPLE_RATE  = 8000;
+    private static final int BUFFER_SIZE  = 1024;
+    private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
+    private static final int CHANNEL_IN   = AudioFormat.CHANNEL_IN_MONO;
+    private static final int CHANNEL_OUT  = AudioFormat.CHANNEL_OUT_MONO;
+
+    // Ports (WiFi)
+    public static final int PORT_AUDIO     = 50005;
+    public static final int PORT_DISCOVERY = 50006;
 
     private final IBinder binder = new LocalBinder();
+
+    // State
+    private CallMode callMode = CallMode.WIFI_ONLY;
+    private boolean  muted    = false;
+
+    // WiFi
+    private DatagramSocket audioSocket;
+    private DatagramSocket discoverySocket;
+    private InetAddress    peerAddress;
+
+    // Bluetooth
+    private BluetoothCallHelper btHelper;
+
+    // Audio
+    private AudioRecord audioRecord;
+    private AudioTrack  audioTrack;
+    private AudioManager audioManager;
+
+    // Threads
+    private Thread sendThread;
+    private Thread receiveThread;
+    private Thread keepAliveThread;
+    private final AtomicBoolean running = new AtomicBoolean(false);
+
+    public enum CallMode {
+        WIFI_ONLY,
+        WIFI_BT_AUDIO,   // WiFi data + BT headphone audio (SCO)
+        BT_ONLY,         // RFCOMM data, phone mic/speaker
+        BT_BT_MIC        // RFCOMM data + BT headphone mic (SCO)
+    }
+
     public class LocalBinder extends Binder {
-        public CallService get() { return CallService.this; }
-    }
-    @Override public IBinder onBind(Intent i) { return binder; }
-
-    private AudioRecord recorder;
-    private AudioTrack  voicePlayer;
-    private AudioTrack  musicPlayer;
-    private AudioManager am;
-    private DatagramSocket voiceSendSock;
-    private DatagramSocket musicSendSock;
-    private DatagramSocket voiceRecvSock;
-    private DatagramSocket controlSock;
-
-    private final AtomicBoolean running      = new AtomicBoolean(false);
-    private final AtomicBoolean musicRunning = new AtomicBoolean(false);
-    private final LinkedBlockingQueue<byte[]> voiceQ = new LinkedBlockingQueue<>(80);
-    private final LinkedBlockingQueue<byte[]> musicQ = new LinkedBlockingQueue<>(200);
-
-    private InetAddress peerAddr;
-    private float voiceGain = 0.9f;
-    private float musicGain = 0.7f;
-    private boolean muted   = false;
-    private boolean ducking = false;
-    private boolean isHost  = false;
-    private PlaylistManager playlists;
-    private Callback callback;
-
-    // Music stream sample rate tracking
-    private volatile int musicSampleRate = 44100;
-    private volatile int musicChannels   = 2;
-
-    public interface Callback {
-        void onPeerConnected(String username, InetAddress addr);
-        void onDisconnected();
-        void onControlMessage(String msg);
-        void onNowPlaying(String playlist, String song);
+        public CallService getService() { return CallService.this; }
     }
 
-    public void setCallback(Callback cb)        { this.callback  = cb; }
-    public void setHost(boolean h)              { this.isHost    = h; }
-    public void setPlaylists(PlaylistManager p) { this.playlists = p; }
-    public void setMuted(boolean m)             { this.muted     = m; }
-    public void setSpeaker(boolean on)          { am.setSpeakerphoneOn(on); }
-    public void setVoiceGain(float g)           { this.voiceGain = g; }
-    public void setMusicGain(float g)           { this.musicGain = g; sendControl(Protocol.CMD_MUSIC_VOL + g); }
-    public void setPeer(InetAddress addr)       { this.peerAddr  = addr; }
-    public void resetPeer() {
-        peerAddr = null;
-        voiceQ.clear();
-        musicQ.clear();
-    }
+    @Override
+    public IBinder onBind(Intent intent) { return binder; }
 
-    @Override public void onCreate() {
+    @Override
+    public void onCreate() {
         super.onCreate();
-        am = (AudioManager) getSystemService(AUDIO_SERVICE);
-        createChannel();
-        startForeground(NID, buildNotif("RideX ready"));
+        audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+        createNotificationChannel();
     }
 
-    @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
-            stopSession(); stopSelf(); return START_NOT_STICKY;
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_END_CALL.equals(intent.getAction())) {
+            stopCall();
+            stopSelf();
+            return START_NOT_STICKY;
         }
+        if (intent != null && ACTION_MUTE.equals(intent.getAction())) {
+            muted = !muted;
+            return START_NOT_STICKY;
+        }
+        startForeground(NOTIF_ID, buildNotification("Connecting..."));
         return START_STICKY;
     }
 
-    public void startSession(InetAddress peer, boolean host) {
-        if (running.get()) return;
-        peerAddr = peer;
-        isHost   = host;
+    // -------------------------------------------------------
+    // Public API called from Activity
+    // -------------------------------------------------------
+
+    public void setCallMode(CallMode mode) {
+        this.callMode = mode;
+    }
+
+    public void startWifiCall(InetAddress peer, boolean useBtAudio) {
+        this.peerAddress = peer;
         running.set(true);
-        voiceQ.clear();
-        musicQ.clear();
-        setupAudio();
-        new Thread(this::controlLoop,   "Control").start();
-        new Thread(this::voiceSendLoop, "VoiceSend").start();
-        new Thread(this::voiceRecvLoop, "VoiceRecv").start();
-        new Thread(this::voicePlayLoop, "VoicePlay").start();
-        if (!isHost) new Thread(this::musicRecvLoop, "MusicRecv").start();
-        new Thread(this::musicPlayLoop, "MusicPlay").start();
-        updateNotif(host ? "RideX hosting" : "RideX in call");
+        setupAudio(useBtAudio ? CallMode.WIFI_BT_AUDIO : CallMode.WIFI_ONLY);
+        startWifiSend();
+        startWifiReceive();
+        startKeepAlive();
+        updateNotification("In call (WiFi" + (useBtAudio ? " + BT Audio)" : ")"));
     }
 
-    private void setupAudio() {
-        am.setMode(AudioManager.MODE_NORMAL);
-        am.setSpeakerphoneOn(true);
-        int recBuf = Math.max(AudioRecord.getMinBufferSize(VOICE_RATE,
-            AudioFormat.CHANNEL_IN_MONO, FORMAT), PKT_SIZE * 4);
-        recorder = new AudioRecord(MediaRecorder.AudioSource.MIC,
-            VOICE_RATE, AudioFormat.CHANNEL_IN_MONO, FORMAT, recBuf);
-        int playBuf = Math.max(AudioTrack.getMinBufferSize(VOICE_RATE,
-            AudioFormat.CHANNEL_OUT_MONO, FORMAT), PKT_SIZE * 4);
-        voicePlayer = new AudioTrack(AudioManager.STREAM_MUSIC,
-            VOICE_RATE, AudioFormat.CHANNEL_OUT_MONO, FORMAT,
-            playBuf, AudioTrack.MODE_STREAM);
-        buildMusicPlayer(44100, 2);
-        if (recorder.getState()    == AudioRecord.STATE_INITIALIZED) recorder.startRecording();
-        if (voicePlayer.getState() == AudioTrack.STATE_INITIALIZED)  voicePlayer.play();
+    public void startBtCall(boolean useBtMic) {
+        running.set(true);
+        CallMode mode = useBtMic ? CallMode.BT_BT_MIC : CallMode.BT_ONLY;
+        setupAudio(mode);
+        // BT audio send/receive are driven by btHelper callbacks
+        updateNotification("In call (BT" + (useBtMic ? " + BT Mic)" : ")"));
     }
 
-    private void buildMusicPlayer(int rate, int ch) {
+    public void setBtHelper(BluetoothCallHelper helper) {
+        this.btHelper = helper;
+        helper.setAudioCallback(this::onBtAudioReceived, this::readMicBuffer);
+    }
+
+    public void stopCall() {
+        running.set(false);
+        stopAudio();
+        closeWifiSockets();
+        if (btHelper != null) {
+            btHelper.close();
+            btHelper = null;
+        }
+        stopForeground(true);
+        stopSelf();
+    }
+
+    public void setMuted(boolean muted) {
+        this.muted = muted;
+    }
+
+    public void setSpeakerOn(boolean on) {
+        audioManager.setSpeakerphoneOn(on);
+    }
+
+    // -------------------------------------------------------
+    // Audio setup
+    // -------------------------------------------------------
+
+    private void setupAudio(CallMode mode) {
+        audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+
+        if (mode == CallMode.WIFI_BT_AUDIO || mode == CallMode.BT_BT_MIC) {
+            // Start SCO for BT headphone mic/earphone
+            audioManager.startBluetoothSco();
+            audioManager.setBluetoothScoOn(true);
+        }
+
+        int minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT);
+        int recBuf  = Math.max(minBuf, BUFFER_SIZE * 2);
+
+        int micSource = (mode == CallMode.BT_BT_MIC || mode == CallMode.WIFI_BT_AUDIO)
+                ? MediaRecorder.AudioSource.DEFAULT  // Android picks BT mic when SCO active
+                : MediaRecorder.AudioSource.MIC;
+
+        audioRecord = new AudioRecord(micSource, SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT, recBuf);
+
+        int minTrack = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, AUDIO_FORMAT);
+        int trackBuf = Math.max(minTrack, BUFFER_SIZE * 2);
+
+        audioTrack = new AudioTrack(
+                AudioManager.STREAM_VOICE_CALL,
+                SAMPLE_RATE, CHANNEL_OUT, AUDIO_FORMAT,
+                trackBuf, AudioTrack.MODE_STREAM);
+
+        audioRecord.startRecording();
+        audioTrack.play();
+    }
+
+    private void stopAudio() {
         try {
-            if (musicPlayer != null) {
-                try { musicPlayer.stop(); } catch (Exception ignored) {}
-                musicPlayer.release(); musicPlayer = null;
+            if (audioRecord != null) {
+                audioRecord.stop();
+                audioRecord.release();
+                audioRecord = null;
             }
-            musicSampleRate = rate;
-            musicChannels   = ch;
-            int chOut   = ch >= 2 ? AudioFormat.CHANNEL_OUT_STEREO : AudioFormat.CHANNEL_OUT_MONO;
-            int minBuf  = Math.max(AudioTrack.getMinBufferSize(rate, chOut, FORMAT), 8192);
-            musicPlayer = new AudioTrack(AudioManager.STREAM_MUSIC,
-                rate, chOut, FORMAT, minBuf * 4, AudioTrack.MODE_STREAM);
-            if (musicPlayer.getState() == AudioTrack.STATE_INITIALIZED) musicPlayer.play();
-        } catch (Exception e) { e.printStackTrace(); }
+            if (audioTrack != null) {
+                audioTrack.stop();
+                audioTrack.release();
+                audioTrack = null;
+            }
+            audioManager.setBluetoothScoOn(false);
+            audioManager.stopBluetoothSco();
+            audioManager.setMode(AudioManager.MODE_NORMAL);
+        } catch (Exception e) { /* ignore */ }
     }
 
-    private void voiceSendLoop() {
-        try {
-            voiceSendSock = new DatagramSocket();
-            byte[] buf = new byte[PKT_SIZE];
-            while (running.get()) {
-                if (recorder == null || muted || peerAddr == null) { Thread.sleep(10); continue; }
-                int n = recorder.read(buf, 0, buf.length);
-                if (n > 0) {
-                    detectVoice(buf, n);
-                    voiceSendSock.send(new DatagramPacket(buf, n, peerAddr, Protocol.PORT_VOICE));
-                }
-            }
-        } catch (Exception e) { e.printStackTrace(); }
-        finally { closeSock(voiceSendSock); voiceSendSock = null; }
+    // -------------------------------------------------------
+    // Mic buffer for BT helper
+    // -------------------------------------------------------
+
+    private byte[] readMicBuffer() {
+        if (audioRecord == null || muted) return new byte[BUFFER_SIZE];
+        byte[] buf = new byte[BUFFER_SIZE];
+        audioRecord.read(buf, 0, buf.length);
+        return buf;
     }
 
-    private void voiceRecvLoop() {
-        try {
-            voiceRecvSock = new DatagramSocket(Protocol.PORT_VOICE);
-            voiceRecvSock.setSoTimeout(3000);
-            byte[] buf = new byte[PKT_SIZE * 4];
-            while (running.get()) {
-                try {
-                    DatagramPacket p = new DatagramPacket(buf, buf.length);
-                    voiceRecvSock.receive(p);
-                    byte[] d = new byte[p.getLength()];
-                    System.arraycopy(p.getData(), 0, d, 0, p.getLength());
-                    if (!voiceQ.offer(d)) { voiceQ.poll(); voiceQ.offer(d); }
-                } catch (SocketTimeoutException ignored) {}
-            }
-        } catch (Exception e) { e.printStackTrace(); }
-        finally { closeSock(voiceRecvSock); voiceRecvSock = null; }
-    }
-
-    private void voicePlayLoop() {
-        while (running.get()) {
-            try {
-                byte[] d = voiceQ.poll(300, TimeUnit.MILLISECONDS);
-                if (d != null && voicePlayer != null) {
-                    applyGain(d, voiceGain);
-                    voicePlayer.write(d, 0, d.length);
-                }
-            } catch (InterruptedException e) { break; }
+    private void onBtAudioReceived(byte[] data) {
+        if (audioTrack != null) {
+            audioTrack.write(data, 0, data.length);
         }
     }
 
-    private void musicRecvLoop() {
-        DatagramSocket s = null;
-        try {
-            s = new DatagramSocket(Protocol.PORT_MUSIC);
-            s.setSoTimeout(3000);
-            byte[] buf = new byte[8192];
-            while (running.get()) {
-                try {
-                    DatagramPacket p = new DatagramPacket(buf, buf.length);
-                    s.receive(p);
-                    if (p.getLength() < 64) {
-                        String peek = new String(p.getData(), 0, p.getLength(), "UTF-8");
-                        if (peek.startsWith("HDR:")) {
-                            String[] parts = peek.split(":");
-                            int rate = parts.length > 1 ? Integer.parseInt(parts[1].trim()) : 44100;
-                            int ch   = parts.length > 2 ? Integer.parseInt(parts[2].trim()) : 2;
-                            musicQ.clear();
-                            buildMusicPlayer(rate, ch);
-                            continue;
-                        }
-                    }
-                    byte[] d = new byte[p.getLength()];
-                    System.arraycopy(p.getData(), 0, d, 0, p.getLength());
-                    if (!musicQ.offer(d)) { musicQ.poll(); musicQ.offer(d); }
-                } catch (SocketTimeoutException ignored) {}
-            }
-        } catch (Exception e) { e.printStackTrace(); }
-        finally { closeSock(s); }
-    }
+    // -------------------------------------------------------
+    // WiFi threads
+    // -------------------------------------------------------
 
-    private void musicPlayLoop() {
-        while (running.get()) {
+    private void startWifiSend() {
+        sendThread = new Thread(() -> {
             try {
-                byte[] d = musicQ.poll(300, TimeUnit.MILLISECONDS);
-                if (d == null) continue;
-                if (musicPlayer == null || musicPlayer.getState() != AudioTrack.STATE_INITIALIZED) continue;
-                float g = ducking ? musicGain * 0.25f : musicGain;
-                applyGain(d, g);
-                musicPlayer.write(d, 0, d.length);
-            } catch (InterruptedException e) { break; }
-            catch (Exception ignored) {}
-        }
-    }
-
-    public void streamSong(String uriStr, int plIdx, int songIdx) {
-        stopMusicStream();
-        musicRunning.set(true);
-        new Thread(() -> {
-            MediaExtractor extractor = new MediaExtractor();
-            MediaCodec codec = null;
-            AudioTrack localTrack = null;
-            try {
-                extractor.setDataSource(this, Uri.parse(uriStr), null);
-                int trackIdx = -1;
-                MediaFormat fmt = null;
-                for (int i = 0; i < extractor.getTrackCount(); i++) {
-                    fmt = extractor.getTrackFormat(i);
-                    String mime = fmt.getString(MediaFormat.KEY_MIME);
-                    if (mime != null && mime.startsWith("audio/")) { trackIdx = i; break; }
-                }
-                if (trackIdx < 0 || fmt == null) return;
-                extractor.selectTrack(trackIdx);
-                String mime  = fmt.getString(MediaFormat.KEY_MIME);
-                int songRate = fmt.containsKey(MediaFormat.KEY_SAMPLE_RATE)   ? fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)   : 44100;
-                int songCh   = fmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT) ? fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : 2;
-                int chOut    = songCh >= 2 ? AudioFormat.CHANNEL_OUT_STEREO : AudioFormat.CHANNEL_OUT_MONO;
-
-                // Build local AudioTrack for host playback
-                int localBuf = Math.max(AudioTrack.getMinBufferSize(songRate, chOut, FORMAT), 8192);
-                localTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
-                    songRate, chOut, FORMAT, localBuf * 4, AudioTrack.MODE_STREAM);
-                if (localTrack.getState() == AudioTrack.STATE_INITIALIZED) localTrack.play();
-
-                // Send header to receiver
-                musicSendSock = new DatagramSocket();
-                if (peerAddr != null) {
-                    byte[] hdr = ("HDR:" + songRate + ":" + songCh).getBytes("UTF-8");
-                    musicSendSock.send(new DatagramPacket(hdr, hdr.length, peerAddr, Protocol.PORT_MUSIC));
-                    Thread.sleep(150);
-                }
-
-                codec = MediaCodec.createDecoderByType(mime);
-                codec.configure(fmt, null, null, 0);
-                codec.start();
-
-                MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-                boolean inputDone = false;
-                int bytesPerSec = songRate * songCh * 2;
-                // Use larger chunks - less overhead, smoother
-                int chunkSize = Math.min(bytesPerSec / 25, 1400); // 40ms chunks, UDP safe
-
-                while (musicRunning.get()) {
-                    if (!inputDone) {
-                        int inIdx = codec.dequeueInputBuffer(10000);
-                        if (inIdx >= 0) {
-                            ByteBuffer inBuf = codec.getInputBuffer(inIdx);
-                            inBuf.clear();
-                            int n = extractor.readSampleData(inBuf, 0);
-                            if (n < 0) {
-                                codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                                inputDone = true;
-                            } else {
-                                codec.queueInputBuffer(inIdx, 0, n, extractor.getSampleTime(), 0);
-                                extractor.advance();
-                            }
-                        }
+                audioSocket = new DatagramSocket();
+                audioSocket.setSoTimeout(0);
+                byte[] buf = new byte[BUFFER_SIZE];
+                while (running.get()) {
+                    if (audioRecord == null || muted) {
+                        Thread.sleep(20);
+                        continue;
                     }
-                    int outIdx = codec.dequeueOutputBuffer(info, 10000);
-                    if (outIdx >= 0) {
-                        ByteBuffer outBuf = codec.getOutputBuffer(outIdx);
-                        byte[] pcm = new byte[info.size];
-                        outBuf.get(pcm);
-                        codec.releaseOutputBuffer(outIdx, false);
-
-                        // Play locally on host
-                        if (localTrack != null && localTrack.getState() == AudioTrack.STATE_INITIALIZED) {
-                            byte[] local = pcm.clone();
-                            applyGain(local, musicGain);
-                            localTrack.write(local, 0, local.length);
-                        }
-
-                        // Stream to receiver with proper pacing
-                        int offset = 0;
-                        while (offset < pcm.length && musicRunning.get()) {
-                            int len = Math.min(chunkSize, pcm.length - offset);
-                            if (peerAddr != null)
-                                musicSendSock.send(new DatagramPacket(pcm, offset, len, peerAddr, Protocol.PORT_MUSIC));
-                            offset += len;
-                            long sleepMs = (len * 1000L) / bytesPerSec;
-                            if (sleepMs > 0) Thread.sleep(sleepMs);
-                        }
-                        if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break;
+                    int read = audioRecord.read(buf, 0, buf.length);
+                    if (read > 0 && peerAddress != null) {
+                        DatagramPacket pkt = new DatagramPacket(buf, read, peerAddress, PORT_AUDIO);
+                        audioSocket.send(pkt);
                     }
                 }
-            } catch (Exception e) { e.printStackTrace(); }
-            finally {
-                try { if (codec      != null) { codec.stop();       codec.release();      } } catch (Exception ignored) {}
-                try { if (localTrack != null) { localTrack.stop();  localTrack.release(); } } catch (Exception ignored) {}
-                extractor.release();
-                closeSock(musicSendSock); musicSendSock = null;
-            }
-        }, "MusicStream").start();
+            } catch (Exception e) { /* stopped */ }
+        });
+        sendThread.start();
     }
 
-    public void stopMusicStream() {
-        musicRunning.set(false);
-        closeSock(musicSendSock); musicSendSock = null;
+    private void startWifiReceive() {
+        receiveThread = new Thread(() -> {
+            try {
+                DatagramSocket recvSocket = new DatagramSocket(PORT_AUDIO);
+                recvSocket.setSoTimeout(0);
+                byte[] buf = new byte[BUFFER_SIZE];
+                while (running.get()) {
+                    DatagramPacket pkt = new DatagramPacket(buf, buf.length);
+                    recvSocket.receive(pkt);
+                    if (audioTrack != null) {
+                        audioTrack.write(pkt.getData(), 0, pkt.getLength());
+                    }
+                }
+                recvSocket.close();
+            } catch (Exception e) { /* stopped */ }
+        });
+        receiveThread.start();
     }
 
-    public void sendControl(String msg) {
-        if (peerAddr == null) return;
-        new Thread(() -> {
-            try (DatagramSocket s = new DatagramSocket()) {
-                byte[] d = msg.getBytes("UTF-8");
-                s.send(new DatagramPacket(d, d.length, peerAddr, Protocol.PORT_CONTROL));
-            } catch (Exception e) {}
-        }).start();
+    private void startKeepAlive() {
+        keepAliveThread = new Thread(() -> {
+            try {
+                while (running.get()) {
+                    Thread.sleep(3000);
+                    if (peerAddress != null && audioSocket != null) {
+                        byte[] ping = "PING".getBytes();
+                        DatagramPacket pkt = new DatagramPacket(ping, ping.length, peerAddress, PORT_DISCOVERY);
+                        audioSocket.send(pkt);
+                    }
+                }
+            } catch (Exception e) { /* stopped */ }
+        });
+        keepAliveThread.start();
     }
 
-    private void controlLoop() {
-        try {
-            controlSock = new DatagramSocket(Protocol.PORT_CONTROL);
-            controlSock.setSoTimeout(3000);
-            byte[] buf = new byte[8192];
-            while (running.get()) {
-                try {
-                    DatagramPacket p = new DatagramPacket(buf, buf.length);
-                    controlSock.receive(p);
-                    handleControl(new String(p.getData(), 0, p.getLength(), "UTF-8"), p.getAddress());
-                } catch (SocketTimeoutException ignored) {}
-            }
-        } catch (Exception e) { e.printStackTrace(); }
-        finally { closeSock(controlSock); controlSock = null; }
+    private void closeWifiSockets() {
+        try { if (audioSocket     != null) audioSocket.close();     } catch (Exception e) {}
+        try { if (discoverySocket != null) discoverySocket.close(); } catch (Exception e) {}
+        audioSocket     = null;
+        discoverySocket = null;
     }
 
-    private void handleControl(String msg, InetAddress from) {
-        if (callback == null) return;
-        if (msg.startsWith(Protocol.CMD_HELLO)) {
-            peerAddr = from;
-            callback.onPeerConnected(msg.substring(Protocol.CMD_HELLO.length()), from);
-            if (isHost && playlists != null) {
-                sendControl(Protocol.CMD_ACK + Prefs.getUsername(this));
-                sendControl(Protocol.CMD_PLAYLISTS + playlists.serializeForRemote());
-            }
-        } else if (msg.startsWith(Protocol.CMD_ACK)) {
-            callback.onPeerConnected(msg.substring(Protocol.CMD_ACK.length()), from);
-        } else if (msg.startsWith(Protocol.CMD_NOW_PLAYING)) {
-            String rest = msg.substring(Protocol.CMD_NOW_PLAYING.length());
-            int sep = rest.indexOf('|');
-            callback.onNowPlaying(sep >= 0 ? rest.substring(0, sep) : rest,
-                                  sep >= 0 ? rest.substring(sep + 1) : "");
-        } else if (msg.startsWith(Protocol.CMD_MUSIC_VOL)) {
-            try { musicGain = Float.parseFloat(msg.substring(Protocol.CMD_MUSIC_VOL.length())); } catch (Exception ignored) {}
-        } else if (msg.equals(Protocol.CMD_BYE)) {
-            if (isHost) {
-                peerAddr = null;
-                voiceQ.clear();
-                musicQ.clear();
-            }
-            callback.onDisconnected();
-        } else {
-            callback.onControlMessage(msg);
-        }
-    }
+    // -------------------------------------------------------
+    // Notification
+    // -------------------------------------------------------
 
-    private void detectVoice(byte[] buf, int len) {
-        long sum = 0;
-        for (int i = 0; i < len - 1; i += 2) {
-            short s = (short)((buf[i+1] << 8) | (buf[i] & 0xFF));
-            sum += Math.abs(s);
-        }
-        ducking = len > 0 && (sum / (len / 2f)) > 800;
-    }
-
-    private void applyGain(byte[] buf, float gain) {
-        if (gain >= 0.99f) return;
-        for (int i = 0; i < buf.length - 1; i += 2) {
-            short s = (short)((buf[i+1] << 8) | (buf[i] & 0xFF));
-            s = (short) Math.max(-32768, Math.min(32767, (int)(s * gain)));
-            buf[i]   = (byte)(s & 0xFF);
-            buf[i+1] = (byte)((s >> 8) & 0xFF);
-        }
-    }
-
-    private void closeSock(DatagramSocket s) {
-        if (s != null && !s.isClosed()) try { s.close(); } catch (Exception ignored) {}
-    }
-
-    public void stopSession() {
-        if (!running.getAndSet(false)) return;
-        try { sendControl(Protocol.CMD_BYE); Thread.sleep(150); } catch (Exception ignored) {}
-        stopMusicStream();
-        closeSock(voiceRecvSock);  voiceRecvSock  = null;
-        closeSock(voiceSendSock);  voiceSendSock  = null;
-        closeSock(controlSock);    controlSock    = null;
-        closeSock(musicSendSock);  musicSendSock  = null;
-        try { Thread.sleep(200); } catch (Exception ignored) {}
-        try { if (recorder    != null) { recorder.stop();    recorder.release();    recorder    = null; } } catch (Exception e) {}
-        try { if (voicePlayer != null) { voicePlayer.stop(); voicePlayer.release(); voicePlayer = null; } } catch (Exception e) {}
-        try { if (musicPlayer != null) { musicPlayer.stop(); musicPlayer.release(); musicPlayer = null; } } catch (Exception e) {}
-        peerAddr = null;
-        voiceQ.clear();
-        musicQ.clear();
-        if (am != null) am.setMode(AudioManager.MODE_NORMAL);
-        updateNotif("RideX ready");
-    }
-    // Host-only: reset connection without stopping audio threads
-    public void stopSessionKeepAlive() {
-        try { sendControl(Protocol.CMD_BYE); Thread.sleep(100); } catch (Exception ignored) {}
-        stopMusicStream();
-        peerAddr = null;
-        voiceQ.clear();
-        musicQ.clear();
-        updateNotif("RideX hosting");
-    }
-
-    private void createChannel() {
+    private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel ch = new NotificationChannel(CH, "RideX", NotificationManager.IMPORTANCE_LOW);
+            NotificationChannel ch = new NotificationChannel(
+                    CHANNEL_ID, "VoiceCall Pro", NotificationManager.IMPORTANCE_LOW);
             ch.setSound(null, null);
-            getSystemService(NotificationManager.class).createNotificationChannel(ch);
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            nm.createNotificationChannel(ch);
         }
     }
-    private Notification buildNotif(String text) {
-        Intent open = new Intent(this, MainActivity.class);
-        open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent pi = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE);
-        return new NotificationCompat.Builder(this, CH)
-            .setContentTitle("RideX").setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentIntent(pi).setOngoing(true).setSilent(true).build();
+
+    private Notification buildNotification(String text) {
+        Intent endIntent = new Intent(this, CallService.class);
+        endIntent.setAction(ACTION_END_CALL);
+        PendingIntent endPi = PendingIntent.getService(this, 0, endIntent,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("VoiceCall Pro")
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .setSilent(true)
+                .setOngoing(true)
+                .addAction(android.R.drawable.ic_delete, "End Call", endPi)
+                .build();
     }
-    private void updateNotif(String text) {
-        getSystemService(NotificationManager.class).notify(NID, buildNotif(text));
+
+    private void updateNotification(String text) {
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        nm.notify(NOTIF_ID, buildNotification(text));
     }
-    @Override public void onDestroy() { stopSession(); super.onDestroy(); }
+
+    @Override
+    public void onDestroy() {
+        stopCall();
+        super.onDestroy();
+    }
 }

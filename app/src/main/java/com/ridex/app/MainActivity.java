@@ -1,406 +1,458 @@
-package com.ridex.app;
+package com.voicecallpro.app;
+
 import android.Manifest;
-import android.content.*;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
-import android.net.Uri;
-import android.os.*;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
 import android.view.View;
-import android.widget.*;
-import androidx.activity.result.*;
-import androidx.activity.result.contract.ActivityResultContracts;
+import android.widget.ArrayAdapter;
+import android.widget.Button;
+import android.widget.Spinner;
+import android.widget.TextView;
+import android.widget.Toast;
+
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
-import org.json.*;
+
+import com.google.android.material.switchmaterial.SwitchMaterial;
+import com.google.android.material.textfield.TextInputEditText;
+
 import java.net.InetAddress;
-import java.util.*;
-public class MainActivity extends AppCompatActivity implements CallService.Callback {
-    private EditText etUsername;
-    private TextView tvSaveUser, tvStatus, tvPeer, tvTimer, tvRoomCode;
-    private TextView tvNowPlaying, tvPlaylistName, tvVoiceVol, tvMusicVol;
-    private Button btnHost, btnJoin, btnEndCall, btnMute, btnSpeaker;
-    private Button btnPrev, btnPlayPause, btnNext, btnExpandMusic, btnAddPlaylist;
-    private SeekBar seekVoice, seekMusic;
-    private Spinner spinnerPlaylist;
-    private ListView listSongs;
-    private View musicPanel;
-    private boolean musicPanelOpen = false;
-    private boolean inCall = false, muted = false, speakerOn = false;
-    private boolean isHost = false, isPlaying = false;
-    private int currentPl = 0, currentSong = 0, callSeconds = 0;
-    private Runnable timerRunnable;
-    private final Handler handler = new Handler(Looper.getMainLooper());
-    private CallService service;
-    private boolean bound = false;
-    private PlaylistManager playlists;
-    private DiscoveryHelper discovery;
-    private final List<String>       remotePlNames = new ArrayList<>();
-    private final List<List<String>> remoteSongs   = new ArrayList<>();
-    private ActivityResultLauncher<Uri> folderPicker;
-    private final ServiceConnection conn = new ServiceConnection() {
-        public void onServiceConnected(ComponentName n, IBinder b) {
-            service = ((CallService.LocalBinder) b).get();
-            service.setCallback(MainActivity.this);
-            service.setPlaylists(playlists);
-            bound = true;
-            handler.postDelayed(() -> autoReconnect(), 3000);
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
+import java.util.Set;
+
+public class MainActivity extends AppCompatActivity {
+
+    private static final int PERM_REQUEST = 100;
+
+    // UI
+    private SwitchMaterial    switchWifiBt;
+    private SwitchMaterial    switchBtMic;
+    private TextView          tvStatus, tvSignal, tvTimer, tvRoomCodeDisplay;
+    private Button            btnHost, btnCall, btnMute, btnSpeaker, btnEndCall;
+    private TextInputEditText etRoomCode;
+    private View              layoutWifiCode, layoutBtDevices;
+    private Spinner           spinnerDevices;
+
+    // State
+    private boolean inCall    = false;
+    private boolean muted     = false;
+    private boolean speakerOn = false;
+
+    // Timer
+    private Handler       timerHandler = new Handler(Looper.getMainLooper());
+    private int           callSeconds  = 0;
+    private Runnable      timerRunnable;
+
+    // Service
+    private CallService callService;
+    private boolean     serviceBound = false;
+
+    private final ServiceConnection serviceConn = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder binder) {
+            callService  = ((CallService.LocalBinder) binder).getService();
+            serviceBound = true;
         }
-        public void onServiceDisconnected(ComponentName n) { bound = false; }
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            serviceBound = false;
+        }
     };
 
-    @Override protected void onCreate(Bundle saved) {
-        super.onCreate(saved);
+    // Bluetooth
+    private BluetoothAdapter         btAdapter;
+    private List<BluetoothDevice>     pairedDevices = new ArrayList<>();
+    private List<String>              pairedNames    = new ArrayList<>();
+
+    // Discovery
+    private WifiDiscoveryHelper wifiDiscovery;
+    private String              currentRoomCode;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        playlists = new PlaylistManager(this);
-        bindViews(); requestPerms(); loadPrefs(); setupListeners(); setupFolderPicker();
-        Intent svc = new Intent(this, CallService.class);
-        if (Build.VERSION.SDK_INT >= 26) startForegroundService(svc); else startService(svc);
-        bindService(svc, conn, Context.BIND_AUTO_CREATE);
+        bindViews();
+        setupBluetooth();
+        requestPermissions();
+        setupListeners();
+        bindCallService();
     }
 
     private void bindViews() {
-        etUsername      = findViewById(R.id.etUsername);
-        tvSaveUser      = findViewById(R.id.tvSaveUser);
-        tvStatus        = findViewById(R.id.tvStatus);
-        tvPeer          = findViewById(R.id.tvPeer);
-        tvTimer         = findViewById(R.id.tvTimer);
-        tvRoomCode      = findViewById(R.id.tvRoomCode);
-        tvNowPlaying    = findViewById(R.id.tvNowPlaying);
-        tvPlaylistName  = findViewById(R.id.tvPlaylistName);
-        tvVoiceVol      = findViewById(R.id.tvVoiceVol);
-        tvMusicVol      = findViewById(R.id.tvMusicVol);
-        btnHost         = findViewById(R.id.btnConnect);
-        btnJoin         = findViewById(R.id.btnJoin);
-        btnEndCall      = findViewById(R.id.btnEndCall);
-        btnMute         = findViewById(R.id.btnMute);
-        btnSpeaker      = findViewById(R.id.btnSpeaker);
-        btnPrev         = findViewById(R.id.btnPrev);
-        btnPlayPause    = findViewById(R.id.btnPlayPause);
-        btnNext         = findViewById(R.id.btnNext);
-        btnExpandMusic  = findViewById(R.id.btnExpandMusic);
-        btnAddPlaylist  = findViewById(R.id.btnAddPlaylist);
-        seekVoice       = findViewById(R.id.seekVoice);
-        seekMusic       = findViewById(R.id.seekMusic);
-        spinnerPlaylist = findViewById(R.id.spinnerPlaylist);
-        listSongs       = findViewById(R.id.listSongs);
-        musicPanel      = findViewById(R.id.musicPanel);
+        switchWifiBt      = findViewById(R.id.switchWifiBt);
+        switchBtMic       = findViewById(R.id.switchBtMic);
+        tvStatus          = findViewById(R.id.tvStatus);
+        tvSignal          = findViewById(R.id.tvSignal);
+        tvTimer           = findViewById(R.id.tvTimer);
+        tvRoomCodeDisplay = findViewById(R.id.tvRoomCodeDisplay);
+        btnHost           = findViewById(R.id.btnHost);
+        btnCall           = findViewById(R.id.btnCall);
+        btnMute           = findViewById(R.id.btnMute);
+        btnSpeaker        = findViewById(R.id.btnSpeaker);
+        btnEndCall        = findViewById(R.id.btnEndCall);
+        etRoomCode        = findViewById(R.id.etRoomCode);
+        layoutWifiCode    = findViewById(R.id.layoutWifiCode);
+        layoutBtDevices   = findViewById(R.id.layoutBtDevices);
+        spinnerDevices    = findViewById(R.id.spinnerDevices);
     }
 
-    private void loadPrefs() { etUsername.setText(Prefs.getUsername(this)); }
+    private void setupBluetooth() {
+        BluetoothManager bm = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        if (bm != null) btAdapter = bm.getAdapter();
+    }
 
     private void setupListeners() {
-        tvSaveUser.setOnClickListener(v -> {
-            String u = etUsername.getText().toString().trim();
-            if (!u.isEmpty()) { Prefs.saveUsername(this, u); toast("Saved"); }
+        // Toggle 1: WiFi only <-> WiFi + BT Audio
+        switchWifiBt.setOnCheckedChangeListener((btn, checked) -> {
+            TextView tvLeft  = findViewById(R.id.tvWifiLabel);
+            TextView tvRight = findViewById(R.id.tvWifiBtLabel);
+            if (checked) {
+                tvLeft.setTextColor(getColor(R.color.text_secondary));
+                tvRight.setTextColor(getColor(R.color.accent));
+                setStatus("Mode: WiFi + BT Audio");
+            } else {
+                tvLeft.setTextColor(getColor(R.color.accent));
+                tvRight.setTextColor(getColor(R.color.text_secondary));
+                setStatus("Mode: WiFi Only");
+            }
+            updateModeUi();
         });
-        btnHost.setOnClickListener(v -> startHost());
-        btnJoin.setOnClickListener(v -> startJoin());
-        btnEndCall.setOnClickListener(v -> endCall());
+
+        // Toggle 2: BT data only <-> BT data + BT Mic
+        switchBtMic.setOnCheckedChangeListener((btn, checked) -> {
+            if (checked) {
+                setStatus("Mode: BT Transfer + BT Mic (SCO)");
+                // Switch to BT device picker
+                layoutWifiCode.setVisibility(View.GONE);
+                layoutBtDevices.setVisibility(View.VISIBLE);
+                loadPairedDevices();
+            } else {
+                setStatus("Mode: BT Transfer only");
+                updateModeUi();
+            }
+        });
+
+        btnHost.setOnClickListener(v -> onHostClicked());
+        btnCall.setOnClickListener(v -> onCallClicked());
         btnMute.setOnClickListener(v -> toggleMute());
         btnSpeaker.setOnClickListener(v -> toggleSpeaker());
-        btnExpandMusic.setOnClickListener(v -> toggleMusicPanel());
-        btnPrev.setOnClickListener(v -> onPrev());
-        btnNext.setOnClickListener(v -> onNext());
-        btnPlayPause.setOnClickListener(v -> onPlayPause());
-        btnAddPlaylist.setOnClickListener(v -> folderPicker.launch(null));
-        seekVoice.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            public void onProgressChanged(SeekBar sb, int p, boolean user) {
-                tvVoiceVol.setText(p + "%"); if (bound) service.setVoiceGain(p / 100f);
-            }
-            public void onStartTrackingTouch(SeekBar sb) {}
-            public void onStopTrackingTouch(SeekBar sb) {}
-        });
-        seekMusic.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            public void onProgressChanged(SeekBar sb, int p, boolean user) {
-                tvMusicVol.setText(p + "%"); if (bound) service.setMusicGain(p / 100f);
-            }
-            public void onStartTrackingTouch(SeekBar sb) {}
-            public void onStopTrackingTouch(SeekBar sb) {}
-        });
-        spinnerPlaylist.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
-                selectPlaylist(pos);
-                if (!isHost && bound && inCall) service.sendControl(Protocol.CMD_SELECT_PL + pos);
-            }
-            public void onNothingSelected(AdapterView<?> parent) {}
-        });
-        listSongs.setOnItemClickListener((parent, view, pos, id) -> {
-            if (isHost) playSong(currentPl, pos);
-            else if (bound && inCall) service.sendControl(Protocol.CMD_SELECT_SONG + pos);
-        });
+        btnEndCall.setOnClickListener(v -> endCall());
     }
 
-    private void setupFolderPicker() {
-        folderPicker = registerForActivityResult(new ActivityResultContracts.OpenDocumentTree(), uri -> {
-            if (uri == null) return;
-            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            playlists.addFromFolder(uri);
-            if (bound) service.setPlaylists(playlists);
-            refreshPlaylistSpinner();
-            toast("Playlist added");
-        });
-    }
-
-    private void startHost() {
-        isHost = true;
-        String myName = Prefs.getUsername(this);
-        tvRoomCode.setText("Hosting as: " + myName);
-        tvRoomCode.setVisibility(View.VISIBLE);
-        setStatus("Waiting for guest...");
-        if (discovery != null) discovery.stop();
-        discovery = new DiscoveryHelper();
-        discovery.startBeacon(myName);
-        if (bound) { service.setHost(true); service.setPlaylists(playlists); service.startSession(null, true); }
-        showCallUI();
-        refreshPlaylistSpinner();
-    }
-
-    private void startJoin() {
-        isHost = false;
-        setStatus("Scanning for host...");
-        if (discovery != null) discovery.stop();
-        discovery = new DiscoveryHelper();
-        discovery.searchForHost(new DiscoveryHelper.Listener() {
-            public void onFound(InetAddress addr, String hostName) {
-                runOnUiThread(() -> {
-                    Prefs.saveLastIp(MainActivity.this, addr.getHostAddress());
-                    Prefs.saveLastCode(MainActivity.this, hostName);
-                    if (bound) {
-                        service.setHost(false);
-                        service.startSession(addr, false);
-                        service.sendControl(Protocol.CMD_HELLO + Prefs.getUsername(MainActivity.this));
-                    }
-                    showCallUI();
-                    setStatus("Connected to " + hostName);
-                    startTimer();
-                });
-            }
-            public void onTimeout() { runOnUiThread(() -> setStatus("No host found")); }
-        });
-    }
-
-    private void autoReconnect() {
-        String ip   = Prefs.getLastIp(this);
-        String code = Prefs.getLastCode(this);
-        if (ip != null && code != null && !inCall) {
-            new Thread(() -> {
-                try {
-                    if (InetAddress.getByName(ip).isReachable(2000))
-                        runOnUiThread(() -> startJoin());
-                } catch (Exception ignored) {}
-            }).start();
+    private void updateModeUi() {
+        boolean btMode = switchBtMic.isChecked();
+        if (btMode) {
+            layoutWifiCode.setVisibility(View.GONE);
+            layoutBtDevices.setVisibility(View.VISIBLE);
+            loadPairedDevices();
+        } else {
+            layoutWifiCode.setVisibility(View.VISIBLE);
+            layoutBtDevices.setVisibility(View.GONE);
         }
     }
 
-    private void showCallUI() {
+    private void loadPairedDevices() {
+        pairedDevices.clear();
+        pairedNames.clear();
+        if (btAdapter == null) {
+            Toast.makeText(this, "Bluetooth not available", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "BT Connect permission needed", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Set<BluetoothDevice> bonded = btAdapter.getBondedDevices();
+        if (bonded != null) {
+            for (BluetoothDevice d : bonded) {
+                pairedDevices.add(d);
+                pairedNames.add(d.getName() != null ? d.getName() : d.getAddress());
+            }
+        }
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, pairedNames);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerDevices.setAdapter(adapter);
+        if (pairedNames.isEmpty()) {
+            Toast.makeText(this, "No paired BT devices found", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    // -------------------------------------------------------
+    // Host / Call actions
+    // -------------------------------------------------------
+
+    private void onHostClicked() {
+        if (switchBtMic.isChecked()) {
+            // BT HOST — wait for RFCOMM connection
+            startBtHost();
+        } else {
+            // WiFi HOST — generate room code and broadcast
+            currentRoomCode = String.format("%06d", new Random().nextInt(1000000));
+            tvRoomCodeDisplay.setText("Room Code: " + currentRoomCode);
+            tvRoomCodeDisplay.setVisibility(View.VISIBLE);
+            setStatus("● Hosting — sharing room code");
+            if (wifiDiscovery != null) wifiDiscovery.stop();
+            wifiDiscovery = new WifiDiscoveryHelper();
+            wifiDiscovery.startHostBeacon(currentRoomCode);
+            // Host also needs to listen for audio — we start service but wait for peer
+            startCallServiceFg();
+            // When guest connects they send audio; host starts audio immediately
+            startWifiCallAsHost();
+        }
+    }
+
+    private void onCallClicked() {
+        if (switchBtMic.isChecked()) {
+            // BT GUEST — connect to selected paired device
+            if (pairedDevices.isEmpty()) {
+                Toast.makeText(this, "No paired device selected", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            int idx = spinnerDevices.getSelectedItemPosition();
+            BluetoothDevice device = pairedDevices.get(idx);
+            startBtGuest(device);
+        } else {
+            // WiFi GUEST — search for host by room code
+            String code = etRoomCode.getText() != null ? etRoomCode.getText().toString().trim() : "";
+            if (code.length() != 6) {
+                Toast.makeText(this, "Enter a 6-digit room code", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            searchForWifiHost(code);
+        }
+    }
+
+    // -------------------------------------------------------
+    // WiFi flow
+    // -------------------------------------------------------
+
+    private void startCallServiceFg() {
+        Intent svc = new Intent(this, CallService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(svc);
+        } else {
+            startService(svc);
+        }
+    }
+
+    private void startWifiCallAsHost() {
+        // Host listens; peer address will be set when first packet arrives.
+        // For simplicity we set the call as started and audio threads handle the rest.
+        if (!serviceBound) return;
+        boolean useBtAudio = switchWifiBt.isChecked();
+        callService.setCallMode(useBtAudio ? CallService.CallMode.WIFI_BT_AUDIO : CallService.CallMode.WIFI_ONLY);
+        // Host doesn't know peer yet — peerAddress = null initially, sendThread handles null check
+        callService.startWifiCall(null, useBtAudio);
+        onCallStarted();
+    }
+
+    private void searchForWifiHost(String code) {
+        setStatus("● Searching for host...");
+        if (wifiDiscovery != null) wifiDiscovery.stop();
+        wifiDiscovery = new WifiDiscoveryHelper();
+        wifiDiscovery.searchForHost(code, new WifiDiscoveryHelper.DiscoveryListener() {
+            @Override
+            public void onHostFound(InetAddress address) {
+                runOnUiThread(() -> {
+                    setStatus("● Connected (WiFi)");
+                    tvSignal.setText("Signal: Good");
+                    startCallServiceFg();
+                    if (serviceBound) {
+                        boolean useBtAudio = switchWifiBt.isChecked();
+                        callService.startWifiCall(address, useBtAudio);
+                    }
+                    onCallStarted();
+                });
+            }
+            @Override
+            public void onTimeout() {
+                runOnUiThread(() -> setStatus("● Host not found. Check code."));
+            }
+            @Override
+            public void onError(String msg) {
+                runOnUiThread(() -> setStatus("● Error: " + msg));
+            }
+        });
+    }
+
+    // -------------------------------------------------------
+    // Bluetooth flow
+    // -------------------------------------------------------
+
+    private void startBtHost() {
+        if (btAdapter == null) { Toast.makeText(this, "No BT", Toast.LENGTH_SHORT).show(); return; }
+        setStatus("● Waiting for BT connection...");
+        startCallServiceFg();
+        BluetoothCallHelper helper = new BluetoothCallHelper();
+        if (serviceBound) callService.setBtHelper(helper);
+        helper.startAsHost(btAdapter, new BluetoothCallHelper.ConnectionListener() {
+            @Override
+            public void onConnected() {
+                runOnUiThread(() -> {
+                    if (helper.isConnected()) {
+                        setStatus("● Connected (BT)");
+                        if (serviceBound) callService.startBtCall(switchBtMic.isChecked());
+                        onCallStarted();
+                    } else {
+                        setStatus("● Waiting for guest to connect...");
+                    }
+                });
+            }
+            @Override
+            public void onError(String msg) {
+                runOnUiThread(() -> setStatus("● BT Error: " + msg));
+            }
+        });
+    }
+
+    private void startBtGuest(BluetoothDevice device) {
+        setStatus("● Connecting to " + (device.getName() != null ? device.getName() : device.getAddress()));
+        startCallServiceFg();
+        BluetoothCallHelper helper = new BluetoothCallHelper();
+        if (serviceBound) callService.setBtHelper(helper);
+        helper.connectToDevice(device, new BluetoothCallHelper.ConnectionListener() {
+            @Override
+            public void onConnected() {
+                runOnUiThread(() -> {
+                    setStatus("● Connected (BT)");
+                    if (serviceBound) callService.startBtCall(switchBtMic.isChecked());
+                    onCallStarted();
+                });
+            }
+            @Override
+            public void onError(String msg) {
+                runOnUiThread(() -> setStatus("● BT Connect Error: " + msg));
+            }
+        });
+    }
+
+    // -------------------------------------------------------
+    // Call state helpers
+    // -------------------------------------------------------
+
+    private void onCallStarted() {
         inCall = true;
-        btnHost.setVisibility(View.GONE);
-        btnJoin.setVisibility(View.GONE);
         btnEndCall.setVisibility(View.VISIBLE);
         tvTimer.setVisibility(View.VISIBLE);
         callSeconds = 0;
+        startTimer();
     }
 
     private void endCall() {
-        inCall = false; stopTimer();
-        if (discovery != null) { discovery.stop(); discovery = null; }
-        if (bound) service.stopSession();
-        btnHost.setVisibility(View.VISIBLE);
-        btnJoin.setVisibility(View.VISIBLE);
-        btnEndCall.setVisibility(View.GONE);
-        tvTimer.setVisibility(View.GONE);
-        tvRoomCode.setVisibility(View.GONE);
-        tvPeer.setVisibility(View.GONE);
-        setStatus("Idle");
-        isPlaying = false;
-        btnPlayPause.setText("\u25B6");
-    }
-    private void endCallKeepHosting() {
+        inCall = false;
         stopTimer();
-        callSeconds = 0;
-        if (bound) service.stopSessionKeepAlive();
-        tvPeer.setVisibility(View.GONE);
-        tvTimer.setText("00:00");
-        isPlaying = false;
-        btnPlayPause.setText("\u25B6");
-        // Restart beacon
-        if (discovery != null) discovery.stop();
-        discovery = new DiscoveryHelper();
-        discovery.startBeacon(Prefs.getUsername(this));
-        setStatus("Waiting for guest...");
+        tvTimer.setVisibility(View.GONE);
+        btnEndCall.setVisibility(View.GONE);
+        tvRoomCodeDisplay.setVisibility(View.GONE);
+        setStatus("● Idle");
+        tvSignal.setText("Signal: --");
+        if (wifiDiscovery != null) { wifiDiscovery.stop(); wifiDiscovery = null; }
+        if (serviceBound) callService.stopCall();
+        Intent stopIntent = new Intent(this, CallService.class);
+        stopService(stopIntent);
     }
 
-    private void refreshPlaylistSpinner() {
-        List<String> names = new ArrayList<>();
-        if (isHost) { for (PlaylistManager.Playlist pl : playlists.getAll()) names.add(pl.name); }
-        else        { names.addAll(remotePlNames); }
-        ArrayAdapter<String> a = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, names);
-        a.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spinnerPlaylist.setAdapter(a);
-        if (!names.isEmpty()) selectPlaylist(0);
-    }
-
-    private void selectPlaylist(int idx) {
-        currentPl = idx;
-        List<String> songs = new ArrayList<>();
-        if (isHost) {
-            PlaylistManager.Playlist pl = playlists.get(idx);
-            if (pl != null) { songs.addAll(pl.titles); tvPlaylistName.setText(pl.name); }
-        } else {
-            if (idx < remoteSongs.size())   songs.addAll(remoteSongs.get(idx));
-            if (idx < remotePlNames.size()) tvPlaylistName.setText(remotePlNames.get(idx));
-        }
-        listSongs.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, songs));
-    }
-
-    private void playSong(int pl, int song) {
-        if (!isHost || !bound) return;
-        PlaylistManager.Playlist p = playlists.get(pl);
-        if (p == null || song >= p.uris.size()) return;
-        currentPl = pl; currentSong = song; isPlaying = true;
-        service.streamSong(p.uris.get(song), pl, song);
-        String title = p.titles.get(song);
-        tvNowPlaying.setText(title);
-        tvPlaylistName.setText(p.name);
-        btnPlayPause.setText("\u23F8");
-        service.sendControl(Protocol.CMD_NOW_PLAYING + p.name + "|" + title);
-    }
-
-    private void onPlayPause() {
-        if (isHost) {
-            if (isPlaying) {
-                service.stopMusicStream(); isPlaying = false;
-                btnPlayPause.setText("\u25B6");
-                service.sendControl(Protocol.CMD_PAUSE);
-            } else { playSong(currentPl, currentSong); }
-        } else if (bound && inCall) {
-            service.sendControl(isPlaying ? Protocol.CMD_PAUSE : Protocol.CMD_PLAY);
-            isPlaying = !isPlaying;
-            btnPlayPause.setText(isPlaying ? "\u23F8" : "\u25B6");
-        }
-    }
-
-    private void onNext() {
-        if (isHost) {
-            PlaylistManager.Playlist pl = playlists.get(currentPl);
-            if (pl != null) playSong(currentPl, (currentSong + 1) % pl.uris.size());
-        } else if (bound && inCall) service.sendControl(Protocol.CMD_NEXT);
-    }
-
-    private void onPrev() {
-        if (isHost) {
-            PlaylistManager.Playlist pl = playlists.get(currentPl);
-            if (pl == null) return;
-            int idx = currentSong - 1; if (idx < 0) idx = pl.uris.size() - 1;
-            playSong(currentPl, idx);
-        } else if (bound && inCall) service.sendControl(Protocol.CMD_PREV);
-    }
-
-    private void toggleMusicPanel() {
-        musicPanelOpen = !musicPanelOpen;
-        musicPanel.setVisibility(musicPanelOpen ? View.VISIBLE : View.GONE);
-        btnExpandMusic.setText(musicPanelOpen ? "\u2304" : "\u2303");
-    }
     private void toggleMute() {
-        muted = !muted; btnMute.setText(muted ? "Unmute" : "Mute");
-        if (bound) service.setMuted(muted);
+        muted = !muted;
+        btnMute.setText(muted ? "🔇 Unmute" : "🎤 Mute");
+        if (serviceBound) callService.setMuted(muted);
     }
+
     private void toggleSpeaker() {
-        speakerOn = !speakerOn; btnSpeaker.setText(speakerOn ? "Earpiece" : "Speaker");
-        if (bound) service.setSpeaker(speakerOn);
+        speakerOn = !speakerOn;
+        btnSpeaker.setText(speakerOn ? "🔇 Earpiece" : "🔊 Speaker");
+        if (serviceBound) callService.setSpeakerOn(speakerOn);
     }
 
-    @Override public void onPeerConnected(String username, InetAddress addr) {
-        runOnUiThread(() -> {
-            tvPeer.setText("\u2022 " + username); tvPeer.setVisibility(View.VISIBLE);
-            if (isHost) { Prefs.saveLastIp(this, addr.getHostAddress()); service.setPeer(addr); }
-            setStatus("In call with " + username);
-            startTimer();
-        });
-    }
-    @Override public void onDisconnected() {
-        runOnUiThread(() -> {
-            if (!inCall) return;
-            if (isHost) {
-                endCallKeepHosting();
-            } else {
-                setStatus("Disconnected");
-                endCall();
-            }
-        });
-    }
-    @Override public void onNowPlaying(String playlist, String song) {
-        runOnUiThread(() -> {
-            tvNowPlaying.setText(song); tvPlaylistName.setText(playlist);
-            isPlaying = true; btnPlayPause.setText("\u23F8");
-        });
-    }
-    @Override public void onControlMessage(String msg) {
-        if (msg.startsWith(Protocol.CMD_PLAYLISTS)) {
-            runOnUiThread(() -> parseRemotePlaylists(msg.substring(Protocol.CMD_PLAYLISTS.length())));
-        } else if (isHost) {
-            runOnUiThread(() -> handleHostCommand(msg));
-        }
-    }
-
-    private void parseRemotePlaylists(String json) {
-        remotePlNames.clear(); remoteSongs.clear();
-        try {
-            JSONArray root = new JSONArray(json);
-            for (int i = 0; i < root.length(); i++) {
-                JSONObject o = root.getJSONObject(i);
-                remotePlNames.add(o.getString("name"));
-                JSONArray s = o.getJSONArray("songs");
-                List<String> sl = new ArrayList<>();
-                for (int j = 0; j < s.length(); j++) sl.add(s.getString(j));
-                remoteSongs.add(sl);
-            }
-        } catch (Exception e) {}
-        refreshPlaylistSpinner();
-    }
-
-    private void handleHostCommand(String msg) {
-        if      (msg.equals(Protocol.CMD_PLAY))  onPlayPause();
-        else if (msg.equals(Protocol.CMD_PAUSE)) onPlayPause();
-        else if (msg.equals(Protocol.CMD_NEXT))  onNext();
-        else if (msg.equals(Protocol.CMD_PREV))  onPrev();
-        else if (msg.startsWith(Protocol.CMD_SELECT_PL)) {
-            try { selectPlaylist(Integer.parseInt(msg.substring(Protocol.CMD_SELECT_PL.length()))); } catch (Exception ignored) {}
-        } else if (msg.startsWith(Protocol.CMD_SELECT_SONG)) {
-            try { playSong(currentPl, Integer.parseInt(msg.substring(Protocol.CMD_SELECT_SONG.length()))); } catch (Exception ignored) {}
-        }
-    }
+    // -------------------------------------------------------
+    // Timer
+    // -------------------------------------------------------
 
     private void startTimer() {
-        stopTimer();
-        timerRunnable = new Runnable() { public void run() {
-            callSeconds++;
-            tvTimer.setText(String.format("%02d:%02d", callSeconds / 60, callSeconds % 60));
-            handler.postDelayed(this, 1000);
-        }};
-        handler.postDelayed(timerRunnable, 1000);
+        timerRunnable = new Runnable() {
+            @Override
+            public void run() {
+                callSeconds++;
+                int m = callSeconds / 60;
+                int s = callSeconds % 60;
+                tvTimer.setText(String.format("%02d:%02d", m, s));
+                timerHandler.postDelayed(this, 1000);
+            }
+        };
+        timerHandler.postDelayed(timerRunnable, 1000);
     }
-    private void stopTimer() { if (timerRunnable != null) handler.removeCallbacks(timerRunnable); }
-    private void setStatus(String s) { tvStatus.setText(s); }
-    private void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
 
-    private void requestPerms() {
-        List<String> need = new ArrayList<>();
-        need.add(Manifest.permission.RECORD_AUDIO);
-        need.add(Manifest.permission.MODIFY_AUDIO_SETTINGS);
-        if (Build.VERSION.SDK_INT >= 33) {
-            need.add(Manifest.permission.POST_NOTIFICATIONS);
-            need.add(Manifest.permission.READ_MEDIA_AUDIO);
-        } else need.add(Manifest.permission.READ_EXTERNAL_STORAGE);
-        List<String> missing = new ArrayList<>();
-        for (String p : need) if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) missing.add(p);
-        if (!missing.isEmpty()) ActivityCompat.requestPermissions(this, missing.toArray(new String[0]), 100);
+    private void stopTimer() {
+        if (timerRunnable != null) timerHandler.removeCallbacks(timerRunnable);
+        tvTimer.setText("00:00");
     }
-    @Override public void onRequestPermissionsResult(int req, @NonNull String[] p, @NonNull int[] r) {
-        super.onRequestPermissionsResult(req, p, r);
+
+    // -------------------------------------------------------
+    // Status
+    // -------------------------------------------------------
+
+    private void setStatus(String msg) {
+        tvStatus.setText(msg);
     }
-    @Override protected void onDestroy() {
-        if (bound) unbindService(conn);
+
+    // -------------------------------------------------------
+    // Service binding
+    // -------------------------------------------------------
+
+    private void bindCallService() {
+        Intent intent = new Intent(this, CallService.class);
+        bindService(intent, serviceConn, Context.BIND_AUTO_CREATE);
+    }
+
+    // -------------------------------------------------------
+    // Permissions
+    // -------------------------------------------------------
+
+    private void requestPermissions() {
+        List<String> perms = new ArrayList<>();
+        perms.add(Manifest.permission.RECORD_AUDIO);
+        perms.add(Manifest.permission.MODIFY_AUDIO_SETTINGS);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            perms.add(Manifest.permission.BLUETOOTH_CONNECT);
+            perms.add(Manifest.permission.BLUETOOTH_SCAN);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            perms.add(Manifest.permission.POST_NOTIFICATIONS);
+        }
+        List<String> needed = new ArrayList<>();
+        for (String p : perms) {
+            if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) needed.add(p);
+        }
+        if (!needed.isEmpty()) {
+            ActivityCompat.requestPermissions(this, needed.toArray(new String[0]), PERM_REQUEST);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int req, @NonNull String[] perms, @NonNull int[] results) {
+        super.onRequestPermissionsResult(req, perms, results);
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (serviceBound) unbindService(serviceConn);
         super.onDestroy();
     }
 }
