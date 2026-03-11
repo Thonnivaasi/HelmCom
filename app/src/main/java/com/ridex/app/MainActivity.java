@@ -194,7 +194,7 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
         tvTimer.setVisibility(View.GONE);
         tvRoomCode.setVisibility(View.GONE);
         tvPeer.setVisibility(View.GONE);
-        setStatus("Idle");isPlaying=false;
+        setStatus("Tap Join to reconnect");isPlaying=false;
         btnPlayPause.setText("\u25B6");
         remotePlNames.clear();remoteSongs.clear();
     }
@@ -296,8 +296,15 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
     @Override public void onDisconnected(){
         runOnUiThread(()->{
             if(!inCall)return;
-            if(isHost)guestLeft();
-            else{setStatus("Disconnected");endCall();}
+            if(isHost){
+                guestLeft();
+            }else{
+                endCall();
+                // Auto-scan for host again after short delay
+                handler.postDelayed(()->{
+                    if(!inCall)startJoin();
+                },2000);
+            }
         });
     }
     @Override public void onNowPlaying(String playlist,String song){

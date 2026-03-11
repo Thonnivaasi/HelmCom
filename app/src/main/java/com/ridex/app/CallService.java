@@ -302,7 +302,16 @@ public class CallService extends Service {
     public void stopSession(){
         if(!running.getAndSet(false))return;
         stopMusicStream();
-        try{sendControl(Protocol.CMD_BYE);Thread.sleep(150);}catch(Exception ignored){}
+        // Send BYE before closing sockets
+        try{
+            if(peerAddr!=null){
+                DatagramSocket tmp=new DatagramSocket();
+                byte[] d=Protocol.CMD_BYE.getBytes("UTF-8");
+                tmp.send(new DatagramPacket(d,d.length,peerAddr,Protocol.PORT_CONTROL));
+                tmp.close();
+            }
+            Thread.sleep(200);
+        }catch(Exception ignored){}
         closeSock(voiceRecvSock);voiceRecvSock=null;
         closeSock(voiceSendSock);voiceSendSock=null;
         closeSock(controlSock);controlSock=null;
