@@ -215,6 +215,20 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
         isPlaying = false;
         btnPlayPause.setText("\u25B6");
     }
+    private void endCallKeepHosting() {
+        stopTimer();
+        callSeconds = 0;
+        if (bound) service.stopSessionKeepAlive();
+        tvPeer.setVisibility(View.GONE);
+        tvTimer.setText("00:00");
+        isPlaying = false;
+        btnPlayPause.setText("\u25B6");
+        // Restart beacon
+        if (discovery != null) discovery.stop();
+        discovery = new DiscoveryHelper();
+        discovery.startBeacon(Prefs.getUsername(this));
+        setStatus("Waiting for guest...");
+    }
 
     private void refreshPlaylistSpinner() {
         List<String> names = new ArrayList<>();
@@ -305,7 +319,15 @@ public class MainActivity extends AppCompatActivity implements CallService.Callb
         });
     }
     @Override public void onDisconnected() {
-        runOnUiThread(() -> { if (inCall) { setStatus("Disconnected"); endCall(); } });
+        runOnUiThread(() -> {
+            if (!inCall) return;
+            if (isHost) {
+                endCallKeepHosting();
+            } else {
+                setStatus("Disconnected");
+                endCall();
+            }
+        });
     }
     @Override public void onNowPlaying(String playlist, String song) {
         runOnUiThread(() -> {

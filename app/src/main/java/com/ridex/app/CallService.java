@@ -67,6 +67,11 @@ public class CallService extends Service {
     public void setVoiceGain(float g)           { this.voiceGain = g; }
     public void setMusicGain(float g)           { this.musicGain = g; sendControl(Protocol.CMD_MUSIC_VOL + g); }
     public void setPeer(InetAddress addr)       { this.peerAddr  = addr; }
+    public void resetPeer() {
+        peerAddr = null;
+        voiceQ.clear();
+        musicQ.clear();
+    }
 
     @Override public void onCreate() {
         super.onCreate();
@@ -228,6 +233,7 @@ public class CallService extends Service {
         new Thread(() -> {
             MediaExtractor extractor = new MediaExtractor();
             MediaCodec codec = null;
+            AudioTrack localTrack = null;
             try {
                 extractor.setDataSource(this, Uri.parse(uriStr), null);
                 int trackIdx = -1;
@@ -239,16 +245,23 @@ public class CallService extends Service {
                 }
                 if (trackIdx < 0 || fmt == null) return;
                 extractor.selectTrack(trackIdx);
-                String mime     = fmt.getString(MediaFormat.KEY_MIME);
-                int songRate    = fmt.containsKey(MediaFormat.KEY_SAMPLE_RATE)    ? fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)    : 44100;
-                int songCh      = fmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)  ? fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)  : 2;
+                String mime  = fmt.getString(MediaFormat.KEY_MIME);
+                int songRate = fmt.containsKey(MediaFormat.KEY_SAMPLE_RATE)   ? fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)   : 44100;
+                int songCh   = fmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT) ? fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : 2;
+                int chOut    = songCh >= 2 ? AudioFormat.CHANNEL_OUT_STEREO : AudioFormat.CHANNEL_OUT_MONO;
 
-                // Send header
+                // Build local AudioTrack for host playback
+                int localBuf = Math.max(AudioTrack.getMinBufferSize(songRate, chOut, FORMAT), 8192);
+                localTrack = new AudioTrack(AudioManager.STREAM_MUSIC,
+                    songRate, chOut, FORMAT, localBuf * 4, AudioTrack.MODE_STREAM);
+                if (localTrack.getState() == AudioTrack.STATE_INITIALIZED) localTrack.play();
+
+                // Send header to receiver
                 musicSendSock = new DatagramSocket();
                 if (peerAddr != null) {
                     byte[] hdr = ("HDR:" + songRate + ":" + songCh).getBytes("UTF-8");
                     musicSendSock.send(new DatagramPacket(hdr, hdr.length, peerAddr, Protocol.PORT_MUSIC));
-                    Thread.sleep(200);
+                    Thread.sleep(150);
                 }
 
                 codec = MediaCodec.createDecoderByType(mime);
@@ -257,11 +270,9 @@ public class CallService extends Service {
 
                 MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
                 boolean inputDone = false;
-
-                // Calculate bytes per ms for pacing
-                int bytesPerSec = songRate * songCh * 2; // 16-bit = 2 bytes
-                int chunkSize   = bytesPerSec / 50;      // 20ms chunks
-                chunkSize = Math.min(chunkSize, 1400);   // UDP safe
+                int bytesPerSec = songRate * songCh * 2;
+                // Use larger chunks - less overhead, smoother
+                int chunkSize = Math.min(bytesPerSec / 25, 1400); // 40ms chunks, UDP safe
 
                 while (musicRunning.get()) {
                     if (!inputDone) {
@@ -286,14 +297,20 @@ public class CallService extends Service {
                         outBuf.get(pcm);
                         codec.releaseOutputBuffer(outIdx, false);
 
-                        // Send in paced chunks matching real playback speed
+                        // Play locally on host
+                        if (localTrack != null && localTrack.getState() == AudioTrack.STATE_INITIALIZED) {
+                            byte[] local = pcm.clone();
+                            applyGain(local, musicGain);
+                            localTrack.write(local, 0, local.length);
+                        }
+
+                        // Stream to receiver with proper pacing
                         int offset = 0;
                         while (offset < pcm.length && musicRunning.get()) {
                             int len = Math.min(chunkSize, pcm.length - offset);
                             if (peerAddr != null)
                                 musicSendSock.send(new DatagramPacket(pcm, offset, len, peerAddr, Protocol.PORT_MUSIC));
                             offset += len;
-                            // Sleep to match real playback speed: len bytes / bytesPerSec * 1000ms
                             long sleepMs = (len * 1000L) / bytesPerSec;
                             if (sleepMs > 0) Thread.sleep(sleepMs);
                         }
@@ -302,7 +319,8 @@ public class CallService extends Service {
                 }
             } catch (Exception e) { e.printStackTrace(); }
             finally {
-                try { if (codec != null) { codec.stop(); codec.release(); } } catch (Exception ignored) {}
+                try { if (codec      != null) { codec.stop();       codec.release();      } } catch (Exception ignored) {}
+                try { if (localTrack != null) { localTrack.stop();  localTrack.release(); } } catch (Exception ignored) {}
                 extractor.release();
                 closeSock(musicSendSock); musicSendSock = null;
             }
@@ -359,6 +377,11 @@ public class CallService extends Service {
         } else if (msg.startsWith(Protocol.CMD_MUSIC_VOL)) {
             try { musicGain = Float.parseFloat(msg.substring(Protocol.CMD_MUSIC_VOL.length())); } catch (Exception ignored) {}
         } else if (msg.equals(Protocol.CMD_BYE)) {
+            if (isHost) {
+                peerAddr = null;
+                voiceQ.clear();
+                musicQ.clear();
+            }
             callback.onDisconnected();
         } else {
             callback.onControlMessage(msg);
@@ -392,7 +415,6 @@ public class CallService extends Service {
         if (!running.getAndSet(false)) return;
         try { sendControl(Protocol.CMD_BYE); Thread.sleep(150); } catch (Exception ignored) {}
         stopMusicStream();
-        // Close all sockets — this unblocks any receive() calls
         closeSock(voiceRecvSock);  voiceRecvSock  = null;
         closeSock(voiceSendSock);  voiceSendSock  = null;
         closeSock(controlSock);    controlSock    = null;
@@ -406,6 +428,15 @@ public class CallService extends Service {
         musicQ.clear();
         if (am != null) am.setMode(AudioManager.MODE_NORMAL);
         updateNotif("RideX ready");
+    }
+    // Host-only: reset connection without stopping audio threads
+    public void stopSessionKeepAlive() {
+        try { sendControl(Protocol.CMD_BYE); Thread.sleep(100); } catch (Exception ignored) {}
+        stopMusicStream();
+        peerAddr = null;
+        voiceQ.clear();
+        musicQ.clear();
+        updateNotif("RideX hosting");
     }
 
     private void createChannel() {
