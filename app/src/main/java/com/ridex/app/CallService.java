@@ -114,7 +114,11 @@ public class CallService extends Service {
         while(running.get()){
             try{
                 byte[] d=voiceQ.poll(300,TimeUnit.MILLISECONDS);
-                if(d!=null&&voicePlayer!=null){applyGain(d,voiceGain);voicePlayer.write(d,0,d.length);}
+                if(d!=null&&voicePlayer!=null){
+                    // Boost voice so it cuts through music
+                    amplify(d, voiceGain * 2.5f);
+                    voicePlayer.write(d,0,d.length);
+                }
             }catch(InterruptedException e){break;}
         }
     }
@@ -146,7 +150,7 @@ public class CallService extends Service {
                         }
                     }
                     if(track==null||track.getState()!=AudioTrack.STATE_INITIALIZED)continue;
-                    float g=ducking?musicGain*0.25f:musicGain;
+                    float g=ducking?musicGain*0.12f:musicGain;
                     byte[] d=new byte[p.getLength()];
                     System.arraycopy(p.getData(),0,d,0,p.getLength());
                     applyGain(d,g);track.write(d,0,d.length);
@@ -298,10 +302,18 @@ public class CallService extends Service {
     private void detectVoice(byte[] buf,int len){
         long sum=0;
         for(int i=0;i<len-1;i+=2){short s=(short)((buf[i+1]<<8)|(buf[i]&0xFF));sum+=Math.abs(s);}
-        ducking=len>0&&(sum/(len/2f))>800;
+        ducking=len>0&&(sum/(len/2f))>400;
     }
     private void applyGain(byte[] buf,float gain){
         if(gain>=0.99f)return;
+        for(int i=0;i<buf.length-1;i+=2){
+            short s=(short)((buf[i+1]<<8)|(buf[i]&0xFF));
+            s=(short)Math.max(-32768,Math.min(32767,(int)(s*gain)));
+            buf[i]=(byte)(s&0xFF);buf[i+1]=(byte)((s>>8)&0xFF);
+        }
+    }
+    // Like applyGain but allows gain > 1.0 for voice boost
+    private void amplify(byte[] buf,float gain){
         for(int i=0;i<buf.length-1;i+=2){
             short s=(short)((buf[i+1]<<8)|(buf[i]&0xFF));
             s=(short)Math.max(-32768,Math.min(32767,(int)(s*gain)));

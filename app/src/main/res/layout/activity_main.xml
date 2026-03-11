@@ -139,12 +139,12 @@
             android:text="No playlist" android:textColor="@color/text_secondary"
             android:textSize="12sp" android:singleLine="true"/>
       </LinearLayout>
-      <Button android:id="@+id/btnPrev" android:layout_width="56dp" android:layout_height="56dp"
-          android:text="&#9664;" android:background="@null" android:textColor="@color/text_primary" android:textSize="24sp"/>
-      <Button android:id="@+id/btnPlayPause" android:layout_width="64dp" android:layout_height="64dp"
-          android:text="&#9654;" android:background="@null" android:textColor="@color/accent" android:textSize="20sp"/>
-      <Button android:id="@+id/btnNext" android:layout_width="56dp" android:layout_height="56dp"
-          android:text="&#9654;&#9654;" android:background="@null" android:textColor="@color/text_primary" android:textSize="13sp"/>
+      <Button android:id="@+id/btnPrev" android:layout_width="64dp" android:layout_height="64dp"
+          android:text="⏮" android:background="@null" android:textColor="@color/text_primary" android:textSize="24sp"/>
+      <Button android:id="@+id/btnPlayPause" android:layout_width="72dp" android:layout_height="72dp"
+          android:text="▶" android:background="@null" android:textColor="@color/accent" android:textSize="20sp"/>
+      <Button android:id="@+id/btnNext" android:layout_width="64dp" android:layout_height="64dp"
+          android:text="⏭" android:background="@null" android:textColor="@color/text_primary" android:textSize="13sp"/>
       <Button android:id="@+id/btnExpandMusic" android:layout_width="56dp" android:layout_height="56dp"
           android:text="&#8963;" android:background="@null" android:textColor="@color/text_secondary" android:textSize="18sp"/>
     </LinearLayout>
